@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var model: FolderCanvasModel
@@ -19,6 +20,9 @@ struct ContentView: View {
         .alert("空间文件夹", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("好", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
+        .sheet(item: $model.infoItem) { item in
+            FileInfoView(item: item)
+        }
     }
 
     private var toolbar: some View {
@@ -26,9 +30,24 @@ struct ContentView: View {
             Button(action: model.chooseFolder) { Label("选择文件夹", systemImage: "folder") }
             if let folder = model.folderURL {
                 Text(folder.lastPathComponent).font(.headline)
+                Menu {
+                    ForEach(model.recentFolders, id: \.path) { recent in
+                        Button(recent.lastPathComponent) { model.open(folder: recent) }
+                            .help(recent.path)
+                    }
+                } label: { Label("最近空间", systemImage: "clock.arrow.circlepath") }
+                .disabled(model.recentFolders.isEmpty)
                 Spacer()
+                TextField("筛选当前空间", text: $model.searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
                 Button(action: model.createFolder) { Label("新建文件夹", systemImage: "folder.badge.plus") }
                 Button(action: model.chooseWallpaper) { Label("壁纸", systemImage: "photo") }
+                Menu {
+                    Button("跟随系统") { model.setAppearanceMode("system") }
+                    Button("浅色") { model.setAppearanceMode("light") }
+                    Button("深色") { model.setAppearanceMode("dark") }
+                } label: { Label("外观", systemImage: "circle.lefthalf.filled") }
                 Button(action: model.refreshItems) { Image(systemName: "arrow.clockwise") }
                     .help("刷新")
             } else { Spacer() }
@@ -42,16 +61,15 @@ private struct FolderCanvasView: View {
     @EnvironmentObject private var model: FolderCanvasModel
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollView(.vertical) {
-                ZStack(alignment: .topLeading) {
+        ScrollView(.vertical) {
+            ZStack(alignment: .topLeading) {
                     CanvasBackground(url: model.wallpaperURL ?? model.defaultDesktopWallpaperURL)
                         .frame(width: model.desktopCanvasSize.width, height: model.desktopCanvasSize.height)
                         .contentShape(Rectangle())
                         .onTapGesture { model.clearSelection() }
                         .gesture(selectionGesture)
-                    ForEach(model.items) { item in
-                        CanvasIcon(item: item)
+            ForEach(model.displayedItems) { item in
+                CanvasIcon(item: item)
                     }
                     if let selection = model.selectionRect {
                         Rectangle()
@@ -61,19 +79,29 @@ private struct FolderCanvasView: View {
                             .position(x: selection.midX, y: selection.midY)
                             .allowsHitTesting(false)
                     }
-                }
-                .frame(width: model.desktopCanvasSize.width,
-                       height: model.desktopCanvasSize.height)
-                .contextMenu {
-                    Menu("新建") {
-                        Button("文件夹", action: model.createFolder)
-                        Button("Excel 工作簿", action: model.createExcelWorkbook)
-                        Button("Word 文档", action: model.createWordDocument)
-                        Button("PowerPoint 演示文稿", action: model.createPowerPointPresentation)
-                    }
+            }
+            .frame(width: model.desktopCanvasSize.width,
+                   height: model.desktopCanvasSize.height)
+            .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: receiveDroppedFiles)
+            .contextMenu {
+                Menu("新建") {
+                    Button("文件夹", action: model.createFolder)
+                    Button("Excel 工作簿", action: model.createExcelWorkbook)
+                    Button("Word 文档", action: model.createWordDocument)
+                    Button("PowerPoint 演示文稿", action: model.createPowerPointPresentation)
                 }
             }
         }
+    }
+
+    private func receiveDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                if let url { DispatchQueue.main.async { model.importFiles([url]) } }
+            }
+        }
+        return true
     }
 
     private var selectionGesture: some Gesture {
@@ -106,7 +134,6 @@ private struct CanvasBackground: View {
 private struct CanvasIcon: View {
     @EnvironmentObject private var model: FolderCanvasModel
     let item: FolderItem
-    @State private var dragOffset: CGSize = .zero
     @State private var isDragging = false
     @State private var renamePresented = false
     @State private var renameText = ""
@@ -126,6 +153,16 @@ private struct CanvasIcon: View {
                 .frame(width: 94 * scale)
                 .foregroundStyle(.white)
                 .shadow(radius: 2)
+            if !item.tags.isEmpty {
+                HStack(spacing: 3) {
+                    ForEach(item.tags, id: \.self) { tag in
+                        Circle()
+                            .fill(tagColor(tag))
+                            .frame(width: 7 * scale, height: 7 * scale)
+                            .help(model.normalizedTagName(tag))
+                    }
+                }
+            }
         }
         .frame(width: 104 * scale, height: 96 * scale)
         .background(isSelected ? Color.accentColor.opacity(0.32) : .clear, in: RoundedRectangle(cornerRadius: 8))
@@ -147,9 +184,33 @@ private struct CanvasIcon: View {
                 model.finishDrag()
                 isDragging = false
             })
+        .onDrag { NSItemProvider(object: item.url as NSURL) }
         .contextMenu {
             Button("打开") { model.open(item) }
             Button("在访达中显示") { model.reveal(item) }
+            Divider()
+            Button("复制") { model.copy([item]) }
+            Button("剪切") { model.cut([item]) }
+            Button("制作副本") { model.duplicate(item) }
+            Button("压缩") { model.compress(item) }
+            Button("分享…") { model.share(item) }
+            Divider()
+            Menu("标签") {
+                ForEach(FinderTag.allCases) { tag in
+                    Button {
+                        model.toggleTag(tag.encodedValue, for: item)
+                    } label: {
+                        if model.hasTag(tag.encodedValue, in: item) {
+                            Label(tag.title, systemImage: "checkmark")
+                        } else {
+                            Text(tag.title)
+                        }
+                    }
+                }
+                Divider()
+                Button("清除所有标签") { model.clearTags(for: item) }
+                    .disabled(item.tags.isEmpty)
+            }
             Divider()
             Menu("图标与字体大小") {
                 scaleButton("小", scale: 0.75, currentScale: scale)
@@ -158,6 +219,7 @@ private struct CanvasIcon: View {
                 scaleButton("特大", scale: 1.5, currentScale: scale)
             }
             Divider()
+            Button("显示简介") { model.showInfo(item) }
             Button("重命名…") { renameText = item.name; renamePresented = true }
             Button("移至废纸篓", role: .destructive) { model.trash(item) }
         }
@@ -179,5 +241,80 @@ private struct CanvasIcon: View {
                 Text(title)
             }
         }
+    }
+
+    private func tagColor(_ tag: String) -> Color {
+        switch model.normalizedTagName(tag).lowercased() {
+        case "红色", "red": return Color.red
+        case "橙色", "orange": return Color.orange
+        case "黄色", "yellow": return Color.yellow
+        case "绿色", "green": return Color.green
+        case "蓝色", "blue": return Color.blue
+        case "紫色", "purple": return Color.purple
+        default: return Color.gray
+        }
+    }
+}
+
+private enum FinderTag: CaseIterable, Identifiable {
+    case red, orange, yellow, green, blue, purple, gray
+
+    var id: String { encodedValue }
+    var title: String {
+        switch self {
+        case .red: "红色"
+        case .orange: "橙色"
+        case .yellow: "黄色"
+        case .green: "绿色"
+        case .blue: "蓝色"
+        case .purple: "紫色"
+        case .gray: "灰色"
+        }
+    }
+    var encodedValue: String {
+        switch self {
+        case .red: "红色\n6"
+        case .orange: "橙色\n7"
+        case .yellow: "黄色\n5"
+        case .green: "绿色\n2"
+        case .blue: "蓝色\n4"
+        case .purple: "紫色\n3"
+        case .gray: "灰色\n1"
+        }
+    }
+}
+
+private struct FileInfoView: View {
+    let item: FolderItem
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: item.url.path)) ?? [:]
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let modified = attributes[.modificationDate] as? Date
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(nsImage: item.icon).resizable().frame(width: 48, height: 48)
+                VStack(alignment: .leading) {
+                    Text(item.name).font(.headline)
+                    Text(item.url.pathExtension.isEmpty ? "文件夹" : item.url.pathExtension.uppercased())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
+                GridRow { Text("位置").foregroundStyle(.secondary); Text(item.url.deletingLastPathComponent().path).textSelection(.enabled) }
+                GridRow { Text("大小").foregroundStyle(.secondary); Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) }
+                if let modified {
+                    GridRow { Text("修改日期").foregroundStyle(.secondary); Text(modified.formatted(date: .long, time: .shortened)) }
+                }
+                GridRow { Text("标签").foregroundStyle(.secondary); Text(item.tags.isEmpty ? "无" : item.tags.map { $0.components(separatedBy: "\n").first ?? $0 }.joined(separator: "、")) }
+            }
+            HStack {
+                Spacer()
+                Button("好") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
     }
 }

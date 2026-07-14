@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import SwiftUI
 
 struct CanvasPoint: Codable, Equatable {
     var x: CGFloat
@@ -33,8 +34,8 @@ struct SavedCanvas: Codable {
 
 struct FolderItem: Identifiable, Hashable {
     let url: URL
-    let isDirectory: Bool
     let icon: NSImage
+    let tags: [String]
 
     var id: String { url.path }
     var name: String { url.lastPathComponent }
@@ -47,6 +48,8 @@ struct FolderItem: Identifiable, Hashable {
 final class FolderCanvasModel: ObservableObject {
     private let defaultIconScale: CGFloat = 1.25
     private let initialColumns = 8
+    private let recentFoldersKey = "recentFolderPaths"
+    private let maximumRecentFolders = 8
     @Published private(set) var folderURL: URL?
     @Published private(set) var items: [FolderItem] = []
     @Published private(set) var positions: [String: CanvasPoint] = [:]
@@ -57,17 +60,63 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var dragTranslation: CGSize = .zero
     @Published private(set) var draggingIDs: Set<String> = []
     @Published var errorMessage: String?
+    @Published private(set) var appearanceMode: String
+    @Published private(set) var recentFolders: [URL] = []
+    @Published var searchText = ""
+    @Published var infoItem: FolderItem?
 
     private var folderMonitor: DispatchSourceFileSystemObject?
+    private var refreshWorkItem: DispatchWorkItem?
+    private var iconCache: [String: NSImage] = [:]
     private var savedCanvas = SavedCanvas()
     private var needsGridMigration = false
     private var selectionStart: CGPoint?
+    private var cutURLs: [URL] = []
     private let grid: CGFloat = 24
 
     private var layoutsDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("SpatialFolder/Layouts", isDirectory: true)
     }
+
+    init() {
+        appearanceMode = UserDefaults.standard.string(forKey: "appearanceMode") ?? "system"
+        recentFolders = (UserDefaults.standard.stringArray(forKey: recentFoldersKey) ?? [])
+            .map(URL.init(fileURLWithPath:))
+            .filter { $0.hasDirectoryPath && FileManager.default.fileExists(atPath: $0.path) }
+        if let path = UserDefaults.standard.string(forKey: "lastOpenedFolderPath") {
+            let url = URL(fileURLWithPath: path)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                open(folder: url)
+            }
+        }
+    }
+
+    var preferredColorScheme: ColorScheme? {
+        switch appearanceMode {
+        case "dark": .dark
+        case "light": .light
+        default: nil
+        }
+    }
+
+    var selectedItems: [FolderItem] { items.filter { selectedIDs.contains($0.id) } }
+
+    var displayedItems: [FolderItem] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return items }
+        return items.filter {
+            $0.name.localizedCaseInsensitiveContains(query) ||
+            $0.tags.contains { normalizedTagName($0).localizedCaseInsensitiveContains(query) }
+        }
+    }
+
+    func setAppearanceMode(_ mode: String) {
+        appearanceMode = mode
+        UserDefaults.standard.set(mode, forKey: "appearanceMode")
+    }
+
 
     func chooseFolder() {
         let panel = NSOpenPanel()
@@ -81,7 +130,10 @@ final class FolderCanvasModel: ObservableObject {
 
     func open(folder: URL) {
         folderMonitor?.cancel()
+        refreshWorkItem?.cancel()
         folderURL = folder.standardizedFileURL
+        UserDefaults.standard.set(folderURL?.path, forKey: "lastOpenedFolderPath")
+        remember(folder: folder.standardizedFileURL)
         selectedIDs = []
         loadSavedCanvas()
         refreshItems()
@@ -91,7 +143,7 @@ final class FolderCanvasModel: ObservableObject {
     func refreshItems() {
         guard let folderURL else { return }
         do {
-            let keys: Set<URLResourceKey> = [.isDirectoryKey, .isHiddenKey]
+            let keys: Set<URLResourceKey> = [.isHiddenKey, .tagNamesKey]
             let urls = try FileManager.default.contentsOfDirectory(
                 at: folderURL,
                 includingPropertiesForKeys: Array(keys),
@@ -100,9 +152,12 @@ final class FolderCanvasModel: ObservableObject {
             let freshItems = urls.compactMap { url -> FolderItem? in
                 let values = try? url.resourceValues(forKeys: keys)
                 guard values?.isHidden != true else { return nil }
-                return FolderItem(url: url, isDirectory: values?.isDirectory == true,
-                                  icon: NSWorkspace.shared.icon(forFile: url.path))
+                return FolderItem(url: url,
+                                  icon: cachedIcon(for: url),
+                                  tags: values?.tagNames ?? [])
             }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            let currentPaths = Set(freshItems.map(\.id))
+            iconCache = iconCache.filter { currentPaths.contains($0.key) }
             items = freshItems
             if needsGridMigration {
                 arrangeAllItemsInGrid(freshItems)
@@ -193,15 +248,113 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func open(_ item: FolderItem) {
-        if item.isDirectory {
-            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: item.url.path)
-        } else {
-            NSWorkspace.shared.open(item.url)
-        }
+        NSWorkspace.shared.open(item.url)
     }
 
     func reveal(_ item: FolderItem) {
         NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    func showInfo(_ item: FolderItem) {
+        infoItem = item
+    }
+
+    func share(_ item: FolderItem) {
+        guard let view = NSApp.keyWindow?.contentView else {
+            errorMessage = "当前没有可用于分享的窗口。"
+            return
+        }
+        let picker = NSSharingServicePicker(items: [item.url])
+        let anchor = NSRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+        picker.show(relativeTo: anchor, of: view, preferredEdge: .minY)
+    }
+
+    func toggleTag(_ tag: String, for item: FolderItem) {
+        var tags = item.tags
+        let normalized = normalizedTagName(tag)
+        if let index = tags.firstIndex(where: { normalizedTagName($0) == normalized }) { tags.remove(at: index) }
+        else { tags.append(tag) }
+        do {
+            try (item.url as NSURL).setResourceValue(tags, forKey: URLResourceKey.tagNamesKey)
+            refreshItems()
+        } catch {
+            errorMessage = "无法更新标签：\(error.localizedDescription)"
+        }
+    }
+
+    func clearTags(for item: FolderItem) {
+        do {
+            try (item.url as NSURL).setResourceValue([], forKey: URLResourceKey.tagNamesKey)
+            refreshItems()
+        } catch {
+            errorMessage = "无法清除标签：\(error.localizedDescription)"
+        }
+    }
+
+    func copy(_ items: [FolderItem]) {
+        let urls = items.map(\.url)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects(urls as [NSURL])
+        cutURLs = []
+    }
+
+    func cut(_ items: [FolderItem]) {
+        copy(items)
+        cutURLs = items.map(\.url)
+    }
+
+    func paste() {
+        let urls = ((NSPasteboard.general.readObjects(forClasses: [NSURL.self]) as? [NSURL]) ?? [])
+            .map { $0 as URL }
+        guard !urls.isEmpty else {
+            errorMessage = "剪贴板中没有可粘贴的文件或文件夹。"
+            return
+        }
+        importFiles(urls, move: urls.allSatisfy { source in cutURLs.contains(source) })
+        cutURLs = []
+    }
+
+    func duplicate(_ item: FolderItem) {
+        do {
+            try FileManager.default.copyItem(at: item.url, to: uniqueDestination(for: item.url, in: item.url.deletingLastPathComponent()))
+            refreshItems()
+        } catch { errorMessage = "无法复制文件：\(error.localizedDescription)" }
+    }
+
+    func compress(_ item: FolderItem) {
+        guard let folderURL else { return }
+        let archiveSource = folderURL
+            .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent)
+            .appendingPathExtension("zip")
+        let archiveURL = uniqueDestination(for: archiveSource, in: folderURL)
+        Task.detached { [weak self] in
+            do {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                process.arguments = ["-c", "-k", "--keepParent", item.url.path, archiveURL.path]
+                try process.run()
+                process.waitUntilExit()
+                guard process.terminationStatus == 0 else {
+                    throw NSError(domain: "SpatialFolder", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "系统压缩命令未能完成。"])
+                }
+                await MainActor.run { self?.refreshItems() }
+            } catch {
+                await MainActor.run { self?.errorMessage = "无法压缩项目：\(error.localizedDescription)" }
+            }
+        }
+    }
+
+    func importFiles(_ urls: [URL], move: Bool = false) {
+        guard let folderURL else { return }
+        do {
+            for source in urls where source.deletingLastPathComponent() != folderURL {
+                let target = uniqueDestination(for: source, in: folderURL)
+                if move { try FileManager.default.moveItem(at: source, to: target) }
+                else { try FileManager.default.copyItem(at: source, to: target) }
+            }
+            refreshItems()
+        } catch { errorMessage = "无法导入文件：\(error.localizedDescription)" }
     }
 
     func trash(_ item: FolderItem) {
@@ -274,6 +427,19 @@ final class FolderCanvasModel: ObservableObject {
                     y: max(grid, (point.y / grid).rounded() * grid))
     }
 
+    private func uniqueDestination(for source: URL, in folder: URL) -> URL {
+        let extensionName = source.pathExtension
+        let baseName = source.deletingPathExtension().lastPathComponent
+        var index = 1
+        var target = folder.appendingPathComponent(source.lastPathComponent)
+        while FileManager.default.fileExists(atPath: target.path) {
+            index += 1
+            let name = "\(baseName) \(index)"
+            target = folder.appendingPathComponent(name).appendingPathExtension(extensionName)
+        }
+        return target
+    }
+
     private func createFromTemplate(resource: String, baseName: String, extension fileExtension: String) {
         guard let folderURL else { return }
         guard let templateURL = Bundle.module.url(forResource: resource, withExtension: fileExtension) else {
@@ -295,12 +461,8 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func assignPositionsToNewItems(_ freshItems: [FolderItem]) {
-        let existingCount = positions.count
-        var newItemIndex = 0
         for item in freshItems where positions[item.id] == nil {
-            let index = existingCount + newItemIndex
-            positions[item.id] = gridPoint(for: index)
-            newItemIndex += 1
+            positions[item.id] = nextInboxPoint()
         }
         persist()
     }
@@ -321,6 +483,24 @@ final class FolderCanvasModel: ObservableObject {
         let cellHeight = canvas.height / CGFloat(initialColumns)
         return CanvasPoint(x: cellWidth * (CGFloat(column) + 0.5),
                            y: cellHeight * (CGFloat(row) + 0.5))
+    }
+
+    private func nextInboxPoint() -> CanvasPoint {
+        let occupied = Set(items.compactMap { positions[$0.id] }.map { "\(Int($0.x)):\(Int($0.y))" })
+        let canvas = desktopCanvasSize
+        let horizontalInset = max(grid * 3, canvas.width - grid * 12)
+        let verticalInset = grid * 3
+        for row in 0..<100 {
+            for column in 0..<3 {
+                let point = CanvasPoint(x: horizontalInset + CGFloat(column) * grid * 4,
+                                        y: verticalInset + CGFloat(row) * grid * 5)
+                let key = "\(Int(point.x)):\(Int(point.y))"
+                if point.x < canvas.width - grid * 2, point.y < canvas.height - grid * 2, !occupied.contains(key) {
+                    return point
+                }
+            }
+        }
+        return gridPoint(for: items.count)
     }
 
     private func layoutURL() -> URL? {
@@ -360,9 +540,38 @@ final class FolderCanvasModel: ObservableObject {
         let descriptor = Darwin.open(folderURL.path, O_EVTONLY)
         guard descriptor >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
-        source.setEventHandler { [weak self] in self?.refreshItems() }
+        source.setEventHandler { [weak self] in self?.scheduleRefresh() }
         source.setCancelHandler { close(descriptor) }
         source.resume()
         folderMonitor = source
+    }
+
+    private func scheduleRefresh() {
+        refreshWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in self?.refreshItems() }
+        refreshWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: workItem)
+    }
+
+    private func cachedIcon(for url: URL) -> NSImage {
+        if let icon = iconCache[url.path] { return icon }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        iconCache[url.path] = icon
+        return icon
+    }
+
+    private func remember(folder: URL) {
+        recentFolders.removeAll { $0.standardizedFileURL == folder }
+        recentFolders.insert(folder, at: 0)
+        recentFolders = Array(recentFolders.prefix(maximumRecentFolders))
+        UserDefaults.standard.set(recentFolders.map(\.path), forKey: recentFoldersKey)
+    }
+
+    func hasTag(_ tag: String, in item: FolderItem) -> Bool {
+        item.tags.contains { normalizedTagName($0) == normalizedTagName(tag) }
+    }
+
+    func normalizedTagName(_ tag: String) -> String {
+        tag.components(separatedBy: "\n").first ?? tag
     }
 }
