@@ -3,6 +3,8 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var model: FolderCanvasModel
+    @State private var resetConfirmationPresented = false
+    @State private var referenceCanvasConfirmationPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -12,6 +14,27 @@ struct ContentView: View {
                 if model.folderURL == nil {
                     ContentUnavailableView("选择一个文件夹", systemImage: "square.grid.2x2",
                                            description: Text("把它变成一张可长期记忆的空间画布。"))
+                } else if model.layoutIsBlocked {
+                    ContentUnavailableView {
+                        Label("布局需要恢复", systemImage: "externaldrive.badge.exclamationmark")
+                    } description: {
+                        Text("原布局文件已保留。请恢复备份、导入布局，或确认重置当前空间。")
+                    } actions: {
+                        HStack {
+                            Button("恢复最近备份", action: model.restoreLatestBackup)
+                                .disabled(model.backupCount == 0)
+                            Button("导入布局…", action: model.importLayout)
+                            Button("重置布局", role: .destructive) { resetConfirmationPresented = true }
+                        }
+                    }
+                } else if model.folderUnavailable {
+                    ContentUnavailableView {
+                        Label("原文件夹暂不可用", systemImage: "folder.badge.questionmark")
+                    } description: {
+                        Text("它可能被移动、改名，或者所在磁盘暂时断开。布局数据仍然保留。")
+                    } actions: {
+                        Button("重新关联文件夹…", action: model.chooseReplacementFolder)
+                    }
                 } else {
                     FolderCanvasView()
                 }
@@ -23,13 +46,29 @@ struct ContentView: View {
         .sheet(item: $model.infoItem) { item in
             FileInfoView(item: item)
         }
+        .alert("重置当前布局？", isPresented: $resetConfirmationPresented) {
+            Button("取消", role: .cancel) {}
+            Button("重置", role: .destructive, action: model.resetLayout)
+        } message: {
+            Text("文件不会被移动或删除，但当前图标位置、大小和待放置状态会重新生成。重置前会保留一份布局备份。")
+        }
+        .alert("将当前显示器设为基准画布？", isPresented: $referenceCanvasConfirmationPresented) {
+            Button("取消", role: .cancel) {}
+            Button("设为基准") { model.setCurrentDisplayAsReferenceCanvas() }
+        } message: {
+            Text("仅当旧版布局已经被小屏幕压缩时使用。文件不会移动，图标坐标会按当前显示器重新映射；操作可撤销并会自动备份。")
+        }
     }
 
     private var toolbar: some View {
         HStack(spacing: 12) {
             Button(action: model.chooseFolder) { Label("选择文件夹", systemImage: "folder") }
             if let folder = model.folderURL {
-                Text(folder.lastPathComponent).font(.headline)
+                Text(folder.lastPathComponent)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 150, alignment: .leading)
                 Menu {
                     ForEach(model.recentFolders, id: \.path) { recent in
                         Button(recent.lastPathComponent) { model.open(folder: recent) }
@@ -42,7 +81,46 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
                 Button(action: model.createFolder) { Label("新建文件夹", systemImage: "folder.badge.plus") }
-                Button(action: model.chooseWallpaper) { Label("壁纸", systemImage: "photo") }
+                Menu {
+                    Button("选择图片…", action: model.chooseWallpaper)
+                    Button("使用系统桌面壁纸") { model.setWallpaper(nil) }
+                } label: { Label("壁纸", systemImage: "photo") }
+                Menu {
+                    Button(model.isLocked ? "解锁画布" : "锁定画布", action: model.toggleLocked)
+                    Divider()
+                    Button("撤销布局修改", action: model.undoLayoutChange)
+                        .disabled(!model.canUndo)
+                    Button("重做布局修改", action: model.redoLayoutChange)
+                        .disabled(!model.canRedo)
+                    Button("找回越界项目", action: model.recoverOutOfBoundsItems)
+                        .disabled(model.isLocked)
+                    Button("将当前显示器设为基准画布…") {
+                        referenceCanvasConfirmationPresented = true
+                    }
+                    .disabled(model.isLocked)
+                    Divider()
+                    Button("恢复最近备份", action: model.restoreLatestBackup)
+                        .disabled(model.backupCount == 0)
+                    Button("查看布局备份（\(model.backupCount)）", action: model.revealBackups)
+                    Button("导出布局…", action: model.exportLayout)
+                    Button("导入布局…", action: model.importLayout)
+                    Divider()
+                    Button("重置当前布局", role: .destructive) { resetConfirmationPresented = true }
+                } label: {
+                    Label(model.isLocked ? "已锁定" : "布局", systemImage: model.isLocked ? "lock.fill" : "square.grid.3x3")
+                }
+                if !model.inboxItems.isEmpty {
+                    Menu {
+                        Text("先把主画布项目移入待放置区，可腾出位置。")
+                        Divider()
+                        ForEach(model.inboxItems) { item in
+                            Button(item.name) { model.placeFromInbox(item) }
+                                .disabled(model.isLocked)
+                        }
+                    } label: {
+                        Label("待放置 \(model.inboxItems.count)", systemImage: "tray.full")
+                    }
+                }
                 Menu {
                     Button("跟随系统") { model.setAppearanceMode("system") }
                     Button("浅色") { model.setAppearanceMode("light") }
@@ -61,15 +139,21 @@ private struct FolderCanvasView: View {
     @EnvironmentObject private var model: FolderCanvasModel
 
     var body: some View {
-        ScrollView(.vertical) {
-            ZStack(alignment: .topLeading) {
+        GeometryReader { geometry in
+            let displayScale = CanvasViewport.displayScale(
+                logicalSize: model.desktopCanvasSize,
+                viewportWidth: geometry.size.width,
+                displaySize: model.currentDisplaySize
+            )
+            ScrollView(.vertical) {
+                ZStack(alignment: .topLeading) {
                     CanvasBackground(url: model.wallpaperURL ?? model.defaultDesktopWallpaperURL)
                         .frame(width: model.desktopCanvasSize.width, height: model.desktopCanvasSize.height)
                         .contentShape(Rectangle())
                         .onTapGesture { model.clearSelection() }
                         .gesture(selectionGesture)
-            ForEach(model.displayedItems) { item in
-                CanvasIcon(item: item)
+                    ForEach(model.displayedItems) { item in
+                        CanvasIcon(item: item)
                     }
                     if let selection = model.selectionRect {
                         Rectangle()
@@ -79,18 +163,42 @@ private struct FolderCanvasView: View {
                             .position(x: selection.midX, y: selection.midY)
                             .allowsHitTesting(false)
                     }
-            }
-            .frame(width: model.desktopCanvasSize.width,
-                   height: model.desktopCanvasSize.height)
-            .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: receiveDroppedFiles)
-            .contextMenu {
-                Menu("新建") {
-                    Button("文件夹", action: model.createFolder)
-                    Button("Excel 工作簿", action: model.createExcelWorkbook)
-                    Button("Word 文档", action: model.createWordDocument)
-                    Button("PowerPoint 演示文稿", action: model.createPowerPointPresentation)
+                }
+                .frame(width: model.desktopCanvasSize.width,
+                       height: model.desktopCanvasSize.height)
+                .scaleEffect(displayScale, anchor: .topLeading)
+                .frame(width: model.desktopCanvasSize.width * displayScale,
+                       height: model.desktopCanvasSize.height * displayScale,
+                       alignment: .topLeading)
+                .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: receiveDroppedFiles)
+                .contextMenu {
+                    Menu("新建") {
+                        Button("文件夹", action: model.createFolder)
+                        Button("Excel 工作簿", action: model.createExcelWorkbook)
+                        Button("Word 文档", action: model.createWordDocument)
+                        Button("PowerPoint 演示文稿", action: model.createPowerPointPresentation)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .overlay(alignment: .topTrailing) {
+            if model.isLocked {
+                Label("布局已锁定", systemImage: "lock.fill")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(12)
+            }
+        }
+        .onAppear(perform: updateCurrentScreenSize)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)) { notification in
+            guard let window = notification.object as? NSWindow, window == NSApp.keyWindow else { return }
+            updateCurrentScreenSize()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            updateCurrentScreenSize()
         }
     }
 
@@ -113,6 +221,11 @@ private struct FolderCanvasView: View {
             .onEnded { _ in
                 model.finishSelection(addingToSelection: NSEvent.modifierFlags.contains(.command))
             }
+    }
+
+    private func updateCurrentScreenSize() {
+        guard let size = NSApp.keyWindow?.screen?.frame.size else { return }
+        model.updateCanvasSize(size)
     }
 }
 
@@ -218,6 +331,9 @@ private struct CanvasIcon: View {
                 scaleButton("大", scale: 1.25, currentScale: scale)
                 scaleButton("特大", scale: 1.5, currentScale: scale)
             }
+            .disabled(model.isLocked)
+            Button("移到待放置区") { model.moveToInbox(item) }
+                .disabled(model.isLocked)
             Divider()
             Button("显示简介") { model.showInfo(item) }
             Button("重命名…") { renameText = item.name; renamePresented = true }
