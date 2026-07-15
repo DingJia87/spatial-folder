@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var resetConfirmationPresented = false
     @State private var referenceCanvasConfirmationPresented = false
     @State private var historyPresented = false
+    @State private var inboxPresented = false
     @State private var toolbarHeight: CGFloat = 52
 
     var body: some View {
@@ -65,6 +66,10 @@ struct ContentView: View {
             OperationHistoryView()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $inboxPresented) {
+            InboxPanelView()
+                .environmentObject(model)
+        }
         .alert("重置当前布局？", isPresented: $resetConfirmationPresented) {
             Button("取消", role: .cancel) {}
             Button("重置", role: .destructive, action: model.resetLayout)
@@ -86,11 +91,18 @@ struct ContentView: View {
         .onPreferenceChange(ToolbarHeightPreferenceKey.self) { height in
             if height > 0 { toolbarHeight = height }
         }
+        .overlay(alignment: .bottom) {
+            if let progress = model.fileOperationProgress {
+                fileOperationProgressView(progress)
+                    .padding(.bottom, 14)
+            }
+        }
     }
 
     private var toolbar: some View {
         HStack(spacing: 12) {
             Button(action: model.chooseFolder) { Label("选择文件夹", systemImage: "folder") }
+                .disabled(model.isFileOperationInProgress)
             if let folder = model.folderURL {
                 Text(folder.lastPathComponent)
                     .font(.headline)
@@ -103,12 +115,13 @@ struct ContentView: View {
                             .help(recent.path)
                     }
                 } label: { Label("最近空间", systemImage: "clock.arrow.circlepath") }
-                .disabled(model.recentFolders.isEmpty)
+                .disabled(model.recentFolders.isEmpty || model.isFileOperationInProgress)
                 Spacer()
                 TextField("筛选当前空间", text: $model.searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
                 Button(action: model.createFolder) { Label("新建文件夹", systemImage: "folder.badge.plus") }
+                    .disabled(model.sessionIsReadOnly || model.isFileOperationInProgress)
                 Menu {
                     Button("选择图片…", action: model.chooseWallpaper)
                     Button("使用系统桌面壁纸") { model.setWallpaper(nil) }
@@ -142,16 +155,10 @@ struct ContentView: View {
                 }
                 .help(model.operationHistoryIsBlocked ? "操作记录需要修复" : "查看、撤销或重做最近操作")
                 if !model.inboxItems.isEmpty {
-                    Menu {
-                        Text("先把主画布项目移入待放置区，可腾出位置。")
-                        Divider()
-                        ForEach(model.inboxItems) { item in
-                            Button(item.name) { model.placeFromInbox(item) }
-                                .disabled(model.isLocked)
-                        }
-                    } label: {
+                    Button { inboxPresented = true } label: {
                         Label("待放置 \(model.inboxItems.count)", systemImage: "tray.full")
                     }
+                    .help("搜索、多选并放回主画布")
                 }
                 Menu {
                     Button("跟随系统") { model.setAppearanceMode("system") }
@@ -160,6 +167,9 @@ struct ContentView: View {
                 } label: { Label("外观", systemImage: "circle.lefthalf.filled") }
                 Button(action: model.refreshItems) { Image(systemName: "arrow.clockwise") }
                     .help("刷新")
+                    .overlay {
+                        if model.isRefreshing { ProgressView().controlSize(.small) }
+                    }
             } else { Spacer() }
         }
         .padding(12)
@@ -172,6 +182,32 @@ struct ContentView: View {
                 )
             }
         }
+    }
+
+    /// 长文件操作的非阻塞进度条；取消会等待当前系统调用结束后回滚。
+    private func fileOperationProgressView(_ progress: FileOperationProgressState) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(progress.title).font(.callout.weight(.semibold))
+                Text(progress.detail).font(.caption).foregroundStyle(.secondary)
+                if let fraction = progress.fractionCompleted {
+                    ProgressView(value: fraction)
+                        .frame(width: 280)
+                } else {
+                    ProgressView().frame(width: 280)
+                }
+            }
+            if progress.allowsCancellation {
+                Button(progress.isCancelling ? "正在取消…" : "取消") {
+                    model.cancelCurrentFileOperation()
+                }
+                .disabled(progress.isCancelling)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(radius: 8)
     }
 }
 
@@ -320,8 +356,11 @@ private struct FolderCanvasView: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .overlay(alignment: .topTrailing) {
-            if model.isLocked {
-                Label("布局已锁定", systemImage: "lock.fill")
+            if model.sessionIsReadOnly || model.isLocked {
+                Label(
+                    model.sessionIsReadOnly ? "另一进程占用 · 只读" : "布局已锁定",
+                    systemImage: model.sessionIsReadOnly ? "exclamationmark.lock.fill" : "lock.fill"
+                )
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -340,10 +379,16 @@ private struct FolderCanvasView: View {
     }
 
     private func receiveDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
-        for provider in providers {
+        guard !providers.isEmpty else { return false }
+        // NSItemProvider 会在任意线程、以任意顺序回调。先按原始序号收齐 URL，
+        // 再一次性交给模型，保证一次拖入只有一条批量记录和一个冲突决策。
+        let collector = DroppedURLCollector(count: providers.count) { urls in
+            model.importFiles(urls)
+        }
+        for (index, provider) in providers.enumerated() {
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
-                if let url { DispatchQueue.main.async { model.importFiles([url]) } }
+                collector.resolve(index: index, url: url)
             }
         }
         return true
@@ -363,6 +408,38 @@ private struct FolderCanvasView: View {
     private func updateCurrentScreenSize() {
         guard let size = NSApp.keyWindow?.screen?.frame.size else { return }
         model.updateCanvasSize(size)
+    }
+}
+
+/// 把一次外部拖放产生的异步回调合并成一个有序批次。
+/// 这里使用锁只保护很短的内存写入，不做文件 I/O，因此不会阻塞画布主线程。
+private final class DroppedURLCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var urls: [URL?]
+    private var resolvedIndexes: Set<Int> = []
+    private var remaining: Int
+    private let completion: @MainActor ([URL]) -> Void
+
+    init(count: Int, completion: @escaping @MainActor ([URL]) -> Void) {
+        urls = Array(repeating: nil, count: count)
+        remaining = count
+        self.completion = completion
+    }
+
+    func resolve(index: Int, url: URL?) {
+        lock.lock()
+        guard urls.indices.contains(index), !resolvedIndexes.contains(index) else {
+            lock.unlock()
+            return
+        }
+        resolvedIndexes.insert(index)
+        urls[index] = url
+        remaining -= 1
+        let completedURLs = remaining == 0 ? urls.compactMap { $0 } : nil
+        lock.unlock()
+
+        guard let completedURLs else { return }
+        Task { @MainActor [completion] in completion(completedURLs) }
     }
 }
 
@@ -408,6 +485,7 @@ private struct CanvasIcon: View {
         let point = model.position(for: item)
         let scale = model.scale(for: item)
         let isSelected = model.selectedIDs.contains(item.id)
+        let contextItems = model.contextItems(for: item)
         let sharedOffset = model.draggingIDs.contains(item.id) ? model.dragTranslation : .zero
         VStack(spacing: 5) {
             Image(nsImage: model.icon(for: item)).resizable().interpolation(.high)
@@ -452,21 +530,23 @@ private struct CanvasIcon: View {
             })
         .onDrag { NSItemProvider(object: item.url as NSURL) }
         .contextMenu {
-            Button("打开") { model.open(item) }
-            Button("在访达中显示") { model.reveal(item) }
+            Button(contextItems.count == 1 ? "打开" : "打开 \(contextItems.count) 个项目") {
+                model.open(contextItems)
+            }
+            Button("在访达中显示") { model.reveal(contextItems) }
             Divider()
-            Button("复制") { model.copy([item]) }
-            Button("剪切") { model.cut([item]) }
-            Button("制作副本") { model.duplicate(item) }
-            Button("压缩") { model.compress(item) }
-            Button("分享…") { model.share(item) }
+            Button("复制") { model.copy(contextItems) }
+            Button("剪切") { model.cut(contextItems) }
+            Button("制作副本") { model.duplicate(contextItems) }
+            Button("压缩") { model.compress(contextItems) }
+            Button("分享…") { model.share(contextItems) }
             Divider()
             Menu("标签") {
                 ForEach(FinderTag.allCases) { tag in
                     Button {
-                        model.toggleTag(tag.encodedValue, for: item)
+                        model.toggleTag(tag.encodedValue, for: contextItems)
                     } label: {
-                        if model.hasTag(tag.encodedValue, in: item) {
+                        if contextItems.allSatisfy({ model.hasTag(tag.encodedValue, in: $0) }) {
                             Label(tag.title, systemImage: "checkmark")
                         } else {
                             Text(tag.title)
@@ -474,23 +554,25 @@ private struct CanvasIcon: View {
                     }
                 }
                 Divider()
-                Button("清除所有标签") { model.clearTags(for: item) }
-                    .disabled(item.tags.isEmpty)
+                Button("清除所有标签") { model.clearTags(for: contextItems) }
+                    .disabled(contextItems.allSatisfy { $0.tags.isEmpty })
             }
             Divider()
             Menu("图标与字体大小") {
-                scaleButton("小", scale: 0.75, currentScale: scale)
-                scaleButton("标准", scale: 1, currentScale: scale)
-                scaleButton("大", scale: 1.25, currentScale: scale)
-                scaleButton("特大", scale: 1.5, currentScale: scale)
+                scaleButton("小", scale: 0.75, currentScale: scale, items: contextItems)
+                scaleButton("标准", scale: 1, currentScale: scale, items: contextItems)
+                scaleButton("大", scale: 1.25, currentScale: scale, items: contextItems)
+                scaleButton("特大", scale: 1.5, currentScale: scale, items: contextItems)
             }
             .disabled(model.isLocked)
-            Button("移到待放置区") { model.moveToInbox(item) }
+            Button("移到待放置区") { model.moveToInbox(contextItems) }
                 .disabled(model.isLocked)
             Divider()
-            Button("显示简介") { model.showInfo(item) }
-            Button("重命名…") { renameText = item.name; renamePresented = true }
-            Button("移至废纸篓", role: .destructive) { model.trash(item) }
+            if contextItems.count == 1 {
+                Button("显示简介") { model.showInfo(item) }
+                Button("重命名…") { renameText = item.name; renamePresented = true }
+            }
+            Button("移至废纸篓", role: .destructive) { model.trash(contextItems) }
         }
         .alert("重命名", isPresented: $renamePresented) {
             TextField("名称", text: $renameText)
@@ -500,9 +582,14 @@ private struct CanvasIcon: View {
     }
 
     @ViewBuilder
-    private func scaleButton(_ title: String, scale: CGFloat, currentScale: CGFloat) -> some View {
+    private func scaleButton(
+        _ title: String,
+        scale: CGFloat,
+        currentScale: CGFloat,
+        items: [FolderItem]
+    ) -> some View {
         Button {
-            model.setScale(scale, for: item)
+            model.setScale(scale, for: items)
         } label: {
             if abs(currentScale - scale) < 0.01 {
                 Label(title, systemImage: "checkmark")
@@ -521,6 +608,92 @@ private struct CanvasIcon: View {
         case "蓝色", "blue": return Color.blue
         case "紫色", "purple": return Color.purple
         default: return Color.gray
+        }
+    }
+}
+
+/// 待放置区不再塞进工具栏菜单：文件多时可搜索、全选和批量放回。
+private struct InboxPanelView: View {
+    @EnvironmentObject private var model: FolderCanvasModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var selectedIDs: Set<String> = []
+
+    private var filteredItems: [FolderItem] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else { return model.inboxItems }
+        return model.inboxItems.filter {
+            $0.name.localizedCaseInsensitiveContains(normalizedQuery)
+        }
+    }
+
+    private var selectedItems: [FolderItem] {
+        model.inboxItems.filter { selectedIDs.contains($0.id) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("待放置区").font(.title2.bold())
+                    Text("主画布还可放置 \(model.availableCanvasSlots) 个项目")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            if model.inboxItems.isEmpty {
+                ContentUnavailableView("待放置区为空", systemImage: "tray")
+            } else {
+                List(selection: $selectedIDs) {
+                    ForEach(filteredItems) { item in
+                        HStack(spacing: 10) {
+                            Image(nsImage: model.icon(for: item))
+                                .resizable()
+                                .frame(width: 28, height: 28)
+                            Text(item.name).lineLimit(1)
+                            Spacer()
+                        }
+                        .tag(item.id)
+                    }
+                }
+                .searchable(text: $query, prompt: "搜索待放置项目")
+            }
+
+            Divider()
+
+            HStack {
+                Button("全选当前结果") {
+                    selectedIDs.formUnion(filteredItems.map(\.id))
+                }
+                .disabled(filteredItems.isEmpty)
+                Button("清除选择") { selectedIDs.removeAll() }
+                    .disabled(selectedIDs.isEmpty)
+                Spacer()
+                Text("已选 \(selectedItems.count) 项")
+                    .foregroundStyle(.secondary)
+                Button("放回主画布") {
+                    model.placeFromInbox(selectedItems)
+                    selectedIDs.subtract(selectedItems.map(\.id))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    selectedItems.isEmpty
+                        || model.availableCanvasSlots == 0
+                        || !model.canEditLayout
+                )
+            }
+            .padding()
+        }
+        .frame(minWidth: 560, minHeight: 430)
+        .onChange(of: model.inboxIDs) { _, currentIDs in
+            selectedIDs.formIntersection(currentIDs)
         }
     }
 }

@@ -84,6 +84,8 @@ enum OperationKind: String, Codable, CaseIterable, Sendable {
 
 enum OperationState: String, Codable, Sendable {
     case pending
+    case undoing
+    case redoing
     case applied
     case undone
     case superseded
@@ -94,6 +96,8 @@ enum OperationState: String, Codable, Sendable {
     var title: String {
         switch self {
         case .pending: "进行中"
+        case .undoing: "正在撤销"
+        case .redoing: "正在重做"
         case .applied: "已完成"
         case .undone: "已撤销"
         case .superseded: "已失效"
@@ -298,7 +302,7 @@ struct OperationHistoryStore {
     }
 }
 
-struct FileOperationConflict: LocalizedError, Equatable {
+struct FileOperationConflict: LocalizedError, Equatable, Sendable {
     let targetPath: String
     let operationSummary: String
 
@@ -324,7 +328,9 @@ enum FileOperationTransitionError: LocalizedError {
     }
 }
 
-struct FileOperationEngine {
+/// `FileManager` 的公开文件操作可跨线程调用；本类型的配置在初始化后不再修改，
+/// 并且 2.4 的协调器保证同一画布只有一个真实文件事务执行，因此可安全传入后台 Actor。
+struct FileOperationEngine: @unchecked Sendable {
     var fileManager: FileManager = .default
     var trashDirectoryForTesting: URL?
 

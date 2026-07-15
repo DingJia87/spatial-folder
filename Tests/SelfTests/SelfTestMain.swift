@@ -16,7 +16,7 @@ struct SpatialFolderSelfTests {
     private static var passed = 0
     private static var failed = 0
 
-    static func main() {
+    static func main() async {
         run("备份数量限制与恢复") { try testBackupRetentionAndRestore() }
         run("损坏布局自动恢复") { try testCorruptRecovery() }
         run("无备份损坏布局阻断") { try testCorruptWithoutBackupBlocks() }
@@ -35,6 +35,9 @@ struct SpatialFolderSelfTests {
         run("第二个画布模型进入只读模式") { try testSecondModelUsesReadOnlySession() }
         run("2.3.2 偏好迁移到稳定版本") { try testPreferencesMigration() }
         run("3000 项目录扫描保持可接受耗时") { try testLargeFolderScanPerformance() }
+        await runAsync("后台批量复制逐步记录并可撤销") { try await testCoordinatedTransferRoundTrip() }
+        await runAsync("后台批量失败自动回滚") { try await testCoordinatedTransferFailureRollsBack() }
+        await runAsync("模型生产路径异步导入不阻塞并落账") { try await testModelAsynchronousImport() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
         run("App 重命名恢复路径与画布位置") { try testModelRenameUndoRedo() }
         run("App 制作副本统一撤销重做") { try testModelDuplicateUndoRedo() }
@@ -50,6 +53,9 @@ struct SpatialFolderSelfTests {
         run("损坏操作记录阻止 App 真实文件修改") { try testCorruptHistoryBlocksModelMutations() }
         run("70 项目进入 64+6 布局") { try testSeventyItemOverflow() }
         run("待放置区与主画布交换") { try testInboxSwap() }
+        run("待放置区批量放回") { try testBatchInboxPlacement() }
+        run("多选整体拖动保持相对位置") { try testGroupDragPreservesRelativeLayout() }
+        run("多选批量副本和废纸篓") { try testBatchDuplicateAndTrash() }
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
         run("撤销、重做和锁定") { try testUndoRedoAndLock() }
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
@@ -75,6 +81,17 @@ struct SpatialFolderSelfTests {
     private static func run(_ name: String, _ body: () throws -> Void) {
         do {
             try body()
+            passed += 1
+            print("✓ \(name)")
+        } catch {
+            failed += 1
+            print("✗ \(name)：\(error)")
+        }
+    }
+
+    private static func runAsync(_ name: String, _ body: () async throws -> Void) async {
+        do {
+            try await body()
             passed += 1
             print("✓ \(name)")
         } catch {
@@ -549,6 +566,115 @@ struct SpatialFolderSelfTests {
         try check(elapsed < .seconds(10), "3000 项目录扫描耗时过长：\(elapsed)")
     }
 
+    private static func testCoordinatedTransferRoundTrip() async throws {
+        let base = temporaryDirectory(prefix: "CoordinatedTransfer")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let sourceFolder = base.appendingPathComponent("Source", isDirectory: true)
+        let destinationFolder = base.appendingPathComponent("Destination", isDirectory: true)
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let source = sourceFolder.appendingPathComponent("report.txt")
+        let destination = destinationFolder.appendingPathComponent("report.txt")
+        try Data("new".utf8).write(to: source)
+        try Data("old".utf8).write(to: destination)
+
+        let engine = FileOperationEngine(trashDirectoryForTesting: trash)
+        let coordinator = FileOperationCoordinator(fileOperationEngine: engine)
+        let collector = OperationEventCollector()
+        let actions = try await coordinator.performTransfers([
+            FileTransferPlan(
+                source: source,
+                destination: destination,
+                move: false,
+                replacesExistingDestination: true
+            )
+        ]) { event in
+            await collector.append(event)
+        }
+        try check(actions.count == 2, "替换复制没有记录保护旧文件和创建新文件两个步骤")
+        let copiedContent = try String(contentsOf: destination, encoding: .utf8)
+        let appliedActionCount = await collector.appliedActionCount()
+        try check(copiedContent == "new", "后台复制结果不正确")
+        try check(appliedActionCount == 2, "协调器没有逐步上报完成动作")
+
+        let record = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "测试后台复制",
+            state: .applied,
+            actions: actions
+        )
+        _ = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        let restoredContent = try String(contentsOf: destination, encoding: .utf8)
+        try check(restoredContent == "old", "撤销后没有恢复被替换的旧文件")
+    }
+
+    private static func testCoordinatedTransferFailureRollsBack() async throws {
+        let base = temporaryDirectory(prefix: "CoordinatedRollback")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let sourceFolder = base.appendingPathComponent("Source", isDirectory: true)
+        let destinationFolder = base.appendingPathComponent("Destination", isDirectory: true)
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let firstSource = sourceFolder.appendingPathComponent("first.txt")
+        let missingSource = sourceFolder.appendingPathComponent("missing.txt")
+        let firstDestination = destinationFolder.appendingPathComponent("first.txt")
+        let missingDestination = destinationFolder.appendingPathComponent("missing.txt")
+        try Data("first".utf8).write(to: firstSource)
+
+        let coordinator = FileOperationCoordinator(fileOperationEngine: FileOperationEngine(
+            trashDirectoryForTesting: trash
+        ))
+        do {
+            _ = try await coordinator.performTransfers([
+                FileTransferPlan(
+                    source: firstSource,
+                    destination: firstDestination,
+                    move: false,
+                    replacesExistingDestination: false
+                ),
+                FileTransferPlan(
+                    source: missingSource,
+                    destination: missingDestination,
+                    move: false,
+                    replacesExistingDestination: false
+                )
+            ]) { _ in }
+            throw SelfTestFailure(description: "缺少源文件的批量操作被错误视为成功")
+        } catch let failure as CoordinatedFileOperationFailure {
+            try check(failure.rollbackSucceeded, "批量失败后没有完成自动回滚")
+            try check(!FileManager.default.fileExists(atPath: firstDestination.path), "批量失败后留下已复制项目")
+            try check(FileManager.default.fileExists(atPath: firstSource.path), "回滚错误修改了复制来源")
+        }
+    }
+
+    /// 覆盖 App 真正使用的异步入口，而不只测试底层协调器。
+    private static func testModelAsynchronousImport() async throws {
+        let fixture = try makeFixture(itemCount: 1, fileOperationsAsynchronously: true)
+        defer { fixture.cleanup() }
+        let sourceFolder = fixture.base.appendingPathComponent("External", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        let sources = (0..<3).map { sourceFolder.appendingPathComponent("incoming-\($0).txt") }
+        for source in sources { try Data(source.lastPathComponent.utf8).write(to: source) }
+
+        fixture.model.importFiles(sources)
+        try check(fixture.model.fileOperationProgress != nil, "异步导入没有立即显示进度")
+
+        let deadline = Date().addingTimeInterval(5)
+        while fixture.model.fileOperationProgress != nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try check(fixture.model.fileOperationProgress == nil, "异步导入在期限内没有完成")
+        try check(sources.allSatisfy {
+            FileManager.default.fileExists(atPath: fixture.folder.appendingPathComponent($0.lastPathComponent).path)
+        }, "异步导入缺少目标文件")
+        let latest = try require(fixture.model.operationRecords.first, "异步导入没有操作记录")
+        try check(latest.state == .applied, "异步导入记录没有落为已完成")
+        try check(latest.actions.count == sources.count, "异步导入没有逐文件落账")
+    }
+
     private static func testModelCreateFolderUndoRedo() throws {
         let fixture = try makeFixture(itemCount: 0)
         defer { fixture.cleanup() }
@@ -646,7 +772,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.canUndo, "重启后文件操作不能撤销")
@@ -670,7 +797,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         try check(reopened.folderURL == movedFolder.standardizedFileURL, "根文件夹移动后没有自动恢复")
         reopened.undoLastAction()
@@ -773,7 +901,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.operationRecords.first?.state == .unavailable, "未完成操作没有标记为需核对")
@@ -801,7 +930,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.operationHistoryIsBlocked, "App 没有识别损坏操作记录")
@@ -834,6 +964,53 @@ struct SpatialFolderSelfTests {
         try check(fixture.model.inboxItems.count == 6, "放入后待放置区数量不正确")
         try check(fixture.model.positions[waitingItem.id] != nil, "待放置项目没有获得位置")
         try assertItemsInsideBounds(fixture.model)
+    }
+
+    private static func testBatchInboxPlacement() throws {
+        let fixture = try makeFixture(itemCount: 6)
+        defer { fixture.cleanup() }
+        let targets = Array(fixture.model.items.prefix(3))
+        fixture.model.moveToInbox(targets)
+        try check(targets.allSatisfy { fixture.model.inboxIDs.contains($0.id) }, "批量移入待放置区不完整")
+        fixture.model.placeFromInbox(targets)
+        try check(targets.allSatisfy { !fixture.model.inboxIDs.contains($0.id) }, "批量放回主画布不完整")
+        try check(targets.allSatisfy { fixture.model.positions[$0.id] != nil }, "批量放回没有生成位置")
+    }
+
+    private static func testGroupDragPreservesRelativeLayout() throws {
+        let fixture = try makeFixture(itemCount: 2, canvasSize: CGSize(width: 1200, height: 800))
+        defer { fixture.cleanup() }
+        let first = fixture.model.items[0]
+        let second = fixture.model.items[1]
+        fixture.model.move(first, to: CGPoint(x: 240, y: 240))
+        fixture.model.move(second, to: CGPoint(x: 480, y: 360))
+        let firstBefore = try require(fixture.model.positions[first.id], "第一个项目没有位置")
+        let secondBefore = try require(fixture.model.positions[second.id], "第二个项目没有位置")
+        fixture.model.select(first, extendingSelection: false)
+        fixture.model.select(second, extendingSelection: true)
+        fixture.model.beginDragging(first)
+        fixture.model.updateDrag(translation: CGSize(width: 2_000, height: 2_000))
+        fixture.model.finishDrag()
+        let firstAfter = try require(fixture.model.positions[first.id], "拖动后第一个项目没有位置")
+        let secondAfter = try require(fixture.model.positions[second.id], "拖动后第二个项目没有位置")
+        try check(
+            secondAfter.x - firstAfter.x == secondBefore.x - firstBefore.x
+                && secondAfter.y - firstAfter.y == secondBefore.y - firstBefore.y,
+            "整体拖动改变了组内相对位置"
+        )
+        try assertItemsInsideBounds(fixture.model)
+    }
+
+    private static func testBatchDuplicateAndTrash() throws {
+        let fixture = try makeFixture(itemCount: 3)
+        defer { fixture.cleanup() }
+        let targets = Array(fixture.model.items.prefix(2))
+        fixture.model.duplicate(targets)
+        try check(fixture.model.items.count == 5, "批量制作副本没有生成两个项目")
+        fixture.model.trash(targets)
+        try check(targets.allSatisfy { !FileManager.default.fileExists(atPath: $0.url.path) }, "批量废纸篓仍保留原文件")
+        try check(fixture.model.operationRecords.last?.kind == .trash, "批量废纸篓没有生成统一记录")
+        try check(fixture.model.operationRecords.last?.actions.count == 2, "批量废纸篓没有逐项记录")
     }
 
     private static func testExternalRenameKeepsPosition() throws {
@@ -883,7 +1060,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.isLocked, "重新打开文件夹后锁定状态丢失")
@@ -1054,7 +1232,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: internalDisplay,
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         let reopenedItem = try require(reopened.items.first, "重启后项目缺失")
@@ -1087,7 +1266,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: external,
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         migrated.open(folder: fixture.folder)
         let migratedItem = try require(migrated.items.first, "迁移后项目缺失")
@@ -1132,7 +1312,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
         )
         defer { fixture.cleanup() }
         try check(reopened.folderURL?.standardizedFileURL == movedFolder.standardizedFileURL, "移动后没有恢复新路径")
@@ -1173,7 +1354,8 @@ struct SpatialFolderSelfTests {
 
     private static func makeFixture(
         itemCount: Int,
-        canvasSize: CGSize = CGSize(width: 1024, height: 768)
+        canvasSize: CGSize = CGSize(width: 1024, height: 768),
+        fileOperationsAsynchronously: Bool = false
     ) throws -> ModelFixture {
         let base = temporaryDirectory(prefix: "Model")
         let folder = base.appendingPathComponent("Root", isDirectory: true)
@@ -1201,7 +1383,8 @@ struct SpatialFolderSelfTests {
             monitorFolders: false,
             sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
             sessionLockingEnabled: false,
-            scansAsynchronously: false
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: fileOperationsAsynchronously
         )
         model.open(folder: folder)
         return ModelFixture(
@@ -1237,5 +1420,20 @@ private struct ModelFixture {
     func cleanup() {
         try? FileManager.default.removeItem(at: base)
         defaults.removePersistentDomain(forName: defaultsSuite)
+    }
+}
+
+/// 线程安全地收集后台协调器事件，供异步自测检查逐步骤记录。
+private actor OperationEventCollector {
+    private var events: [CoordinatedFileOperationEvent] = []
+
+    func append(_ event: CoordinatedFileOperationEvent) {
+        events.append(event)
+    }
+
+    func appliedActionCount() -> Int {
+        events.reduce(into: 0) { count, event in
+            if case .didApply = event { count += 1 }
+        }
     }
 }
