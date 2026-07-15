@@ -14,10 +14,10 @@ struct SpatialFolderApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .undoRedo) {
-                Button("撤销布局修改") { model.undoLayoutChange() }
+                Button("撤销上一步操作") { model.undoLastAction() }
                     .keyboardShortcut("z", modifiers: .command)
                     .disabled(!model.canUndo)
-                Button("重做布局修改") { model.redoLayoutChange() }
+                Button("重做上一步操作") { model.redoLastAction() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
                     .disabled(!model.canRedo)
             }
@@ -38,6 +38,9 @@ struct SpatialFolderApp: App {
                 Button("导出布局…") { model.exportLayout() }
                     .disabled(model.folderURL == nil)
                 Button("导入布局…") { model.importLayout() }
+                    .disabled(model.folderURL == nil)
+                Divider()
+                Button("导出诊断信息…") { model.exportDiagnostics() }
                     .disabled(model.folderURL == nil)
             }
         }

@@ -22,6 +22,28 @@ struct SpatialFolderSelfTests {
         run("无备份损坏布局阻断") { try testCorruptWithoutBackupBlocks() }
         run("旧版路径布局迁移") { try testLegacyMigration() }
         run("跨文件夹布局导入拒绝") { try testWrongFolderImport() }
+        run("操作记录持久化与数量限制") { try testOperationHistoryPersistence() }
+        run("重命名事务撤销与重做") { try testRelocateUndoRedo() }
+        run("新建事务撤销后保留内容") { try testMaterializeUndoRedo() }
+        run("废纸篓事务撤销与重做") { try testDiscardUndoRedo() }
+        run("Finder 标签事务撤销与重做") { try testTagUndoRedo() }
+        run("恢复冲突保留两者") { try testConflictKeepBoth() }
+        run("恢复冲突替换后可逆") { try testConflictReplaceRoundTrip() }
+        run("多项撤销预检防止部分执行") { try testMultiActionPreflightPreventsPartialUndo() }
+        run("损坏操作记录阻止静默覆盖") { try testCorruptOperationHistoryBlocks() }
+        run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
+        run("App 重命名恢复路径与画布位置") { try testModelRenameUndoRedo() }
+        run("App 制作副本统一撤销重做") { try testModelDuplicateUndoRedo() }
+        run("App 移至废纸篓恢复真实文件与位置") { try testModelTrashUndoRestoresLayout() }
+        run("导入替换操作可完整撤销重做") { try testImportReplaceUndoRedo() }
+        run("文件撤销跨重启保留") { try testFileUndoSurvivesRestart() }
+        run("根文件夹移动后文件撤销路径自动迁移") { try testFileUndoAfterRootFolderMove() }
+        run("布局与文件按时序统一撤销") { try testUnifiedUndoOrdering() }
+        run("超出布局撤销深度后历史状态如实标记") { try testLayoutUndoDepthMarksViewOnly() }
+        run("重命名冲突必须明确选择") { try testRenameConflictRequiresChoice() }
+        run("诊断导出不含文件名和路径") { try testDiagnosticsPrivacy() }
+        run("未完成操作在重启后标记核对") { try testPendingOperationMarkedUnavailableOnRestart() }
+        run("损坏操作记录阻止 App 真实文件修改") { try testCorruptHistoryBlocksModelMutations() }
         run("70 项目进入 64+6 布局") { try testSeventyItemOverflow() }
         run("待放置区与主画布交换") { try testInboxSwap() }
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
@@ -139,6 +161,482 @@ struct SpatialFolderSelfTests {
         }
     }
 
+    private static func testOperationHistoryPersistence() throws {
+        let directory = temporaryDirectory(prefix: "Operations")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = OperationHistoryStore(directory: directory, maximumRecords: 20)
+        let key = "canvas"
+        var document = OperationHistoryDocument()
+        for index in 0..<24 {
+            document.records.append(OperationRecord(
+                category: .file,
+                kind: .createDocument,
+                summary: "记录 \(index)",
+                state: .applied,
+                actions: [.materialize(MaterializeAction(destinationPath: "/tmp/\(index)"))]
+            ))
+        }
+        try store.save(document, canvasKey: key)
+        let loaded = try store.load(canvasKey: key)
+        try check(loaded.records.count == 20, "操作记录没有限制为 20 条")
+        try check(loaded.records.first?.summary == "记录 4", "操作记录没有保留最新项目")
+        try check(loaded.records.last?.state == .applied, "操作状态没有持久化")
+    }
+
+    private static func testRelocateUndoRedo() throws {
+        let base = temporaryDirectory(prefix: "Relocate")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let original = base.appendingPathComponent("original.txt")
+        let destination = base.appendingPathComponent("renamed.txt")
+        try Data("rename".utf8).write(to: original)
+        try FileManager.default.moveItem(at: original, to: destination)
+        let engine = FileOperationEngine(trashDirectoryForTesting: base.appendingPathComponent("Trash"))
+        let record = OperationRecord(
+            category: .file,
+            kind: .rename,
+            summary: "重命名",
+            state: .applied,
+            actions: [.relocate(RelocateAction(originalPath: original.path, destinationPath: destination.path))]
+        )
+        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        try check(FileManager.default.fileExists(atPath: original.path), "撤销重命名没有恢复原路径")
+        let redone = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        try check(FileManager.default.fileExists(atPath: destination.path), "重做重命名没有恢复目标路径")
+        try check(redone.state == .applied, "重做后的状态不正确")
+    }
+
+    private static func testMaterializeUndoRedo() throws {
+        let base = temporaryDirectory(prefix: "Materialize")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let destination = base.appendingPathComponent("created.txt")
+        try Data("edited-after-create".utf8).write(to: destination)
+        let engine = FileOperationEngine(trashDirectoryForTesting: base.appendingPathComponent("Trash"))
+        let record = OperationRecord(
+            category: .file,
+            kind: .createDocument,
+            summary: "新建文档",
+            state: .applied,
+            actions: [.materialize(MaterializeAction(destinationPath: destination.path))]
+        )
+        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        try check(!FileManager.default.fileExists(atPath: destination.path), "撤销新建后文件仍存在")
+        _ = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        let restored = try String(contentsOf: destination, encoding: .utf8)
+        try check(restored == "edited-after-create", "重做没有保留撤销前的文件内容")
+    }
+
+    private static func testDiscardUndoRedo() throws {
+        let base = temporaryDirectory(prefix: "Discard")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        let original = base.appendingPathComponent("deleted.txt")
+        let trashURL = trash.appendingPathComponent("deleted.txt")
+        try Data("deleted".utf8).write(to: original)
+        try FileManager.default.moveItem(at: original, to: trashURL)
+        let engine = FileOperationEngine(trashDirectoryForTesting: trash)
+        let record = OperationRecord(
+            category: .file,
+            kind: .trash,
+            summary: "移至废纸篓",
+            state: .applied,
+            actions: [.discard(DiscardAction(originalPath: original.path, trashPath: trashURL.path))]
+        )
+        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        try check(FileManager.default.fileExists(atPath: original.path), "撤销删除没有恢复文件")
+        let redone = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        guard case let .discard(action) = redone.actions.first else {
+            throw SelfTestFailure(description: "删除操作类型被改变")
+        }
+        try check(!FileManager.default.fileExists(atPath: original.path), "重做删除后原文件仍存在")
+        try check(action.trashPath.map { FileManager.default.fileExists(atPath: $0) } == true, "重做删除没有记录新废纸篓位置")
+    }
+
+    private static func testTagUndoRedo() throws {
+        let base = temporaryDirectory(prefix: "Tags")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let file = base.appendingPathComponent("tagged.txt")
+        try Data("tag".utf8).write(to: file)
+        let after = ["红色\n6"]
+        try (file as NSURL).setResourceValue(after, forKey: URLResourceKey.tagNamesKey)
+        let initiallySetTags = try file.resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
+        try check(initiallySetTags == ["红色"], "测试文件系统无法设置 Finder 标签：\(initiallySetTags)")
+        let record = OperationRecord(
+            category: .file,
+            kind: .tags,
+            summary: "修改标签",
+            state: .applied,
+            actions: [.tags(TagAction(path: file.path, before: [], after: after))]
+        )
+        let engine = FileOperationEngine(trashDirectoryForTesting: base.appendingPathComponent("Trash"))
+        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        let undoneTags = try URL(fileURLWithPath: file.path)
+            .resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
+        try check(undoneTags.isEmpty, "撤销没有清除 Finder 标签：\(undoneTags)")
+        _ = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        let redoneTags = try URL(fileURLWithPath: file.path)
+            .resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
+        try check(redoneTags == ["红色"], "重做没有恢复 Finder 标签：\(redoneTags)")
+    }
+
+    private static func testConflictKeepBoth() throws {
+        let base = temporaryDirectory(prefix: "KeepBoth")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        let original = base.appendingPathComponent("report.txt")
+        let trashURL = trash.appendingPathComponent("report.txt")
+        try Data("old".utf8).write(to: trashURL)
+        try Data("current".utf8).write(to: original)
+        let engine = FileOperationEngine(trashDirectoryForTesting: trash)
+        let record = OperationRecord(
+            category: .file,
+            kind: .trash,
+            summary: "恢复报告",
+            state: .applied,
+            actions: [.discard(DiscardAction(originalPath: original.path, trashPath: trashURL.path))]
+        )
+        let undone = try engine.transition(record, to: .undone, conflictChoice: .keepBoth)
+        guard case let .discard(action) = undone.actions.first else {
+            throw SelfTestFailure(description: "恢复操作类型错误")
+        }
+        try check(action.originalPath != original.path, "保留两者没有生成新路径")
+        try check(FileManager.default.fileExists(atPath: action.originalPath), "旧文件没有恢复到新路径")
+        try check(FileManager.default.fileExists(atPath: original.path), "现有文件被覆盖")
+    }
+
+    private static func testConflictReplaceRoundTrip() throws {
+        let base = temporaryDirectory(prefix: "Replace")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        let original = base.appendingPathComponent("report.txt")
+        let oldTrash = trash.appendingPathComponent("old-report.txt")
+        try Data("old".utf8).write(to: oldTrash)
+        try Data("current".utf8).write(to: original)
+        let engine = FileOperationEngine(trashDirectoryForTesting: trash)
+        let record = OperationRecord(
+            category: .file,
+            kind: .trash,
+            summary: "恢复并替换",
+            state: .applied,
+            actions: [.discard(DiscardAction(originalPath: original.path, trashPath: oldTrash.path))]
+        )
+        let undone = try engine.transition(record, to: .undone, conflictChoice: .replace)
+        let restoredOldContent = try String(contentsOf: original, encoding: .utf8)
+        try check(restoredOldContent == "old", "替换后没有恢复旧文件")
+        try check(undone.displacements.count == 1, "被替换文件没有登记可恢复位置")
+        let redone = try engine.transition(undone, to: .applied, conflictChoice: .replace)
+        let restoredCurrentContent = try String(contentsOf: original, encoding: .utf8)
+        try check(restoredCurrentContent == "current", "重做后没有恢复被替换文件")
+        try check(redone.displacements.isEmpty, "重做后冲突位移记录没有清理")
+    }
+
+    private static func testMultiActionPreflightPreventsPartialUndo() throws {
+        let base = temporaryDirectory(prefix: "Preflight")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let existing = base.appendingPathComponent("existing.txt")
+        let missing = base.appendingPathComponent("missing.txt")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try Data("keep".utf8).write(to: existing)
+        let record = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "多项复制",
+            state: .applied,
+            actions: [
+                .materialize(MaterializeAction(destinationPath: missing.path)),
+                .materialize(MaterializeAction(destinationPath: existing.path))
+            ]
+        )
+        let engine = FileOperationEngine(trashDirectoryForTesting: base.appendingPathComponent("Trash"))
+        do {
+            _ = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+            throw SelfTestFailure(description: "错误接受了缺少源文件的多项撤销")
+        } catch FileOperationTransitionError.missingSource {
+            try check(FileManager.default.fileExists(atPath: existing.path), "预检前就移走了其他文件")
+        }
+    }
+
+    private static func testCorruptOperationHistoryBlocks() throws {
+        let directory = temporaryDirectory(prefix: "Operations")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = OperationHistoryStore(directory: directory)
+        let url = store.historyURL(canvasKey: "broken")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("broken".utf8).write(to: url)
+        do {
+            _ = try store.load(canvasKey: "broken")
+            throw SelfTestFailure(description: "损坏操作记录被静默接受")
+        } catch OperationHistoryStoreError.corruptHistory {
+            let preserved = try Data(contentsOf: url)
+            try check(preserved == Data("broken".utf8), "损坏操作记录被覆盖")
+            let archive = try store.archiveCorruptHistoryAndReset(canvasKey: "broken")
+            let archivedData = try Data(contentsOf: archive)
+            try check(archivedData == Data("broken".utf8), "存档没有保留损坏原文件")
+            let reset = try store.load(canvasKey: "broken")
+            try check(reset.records.isEmpty, "存档后没有创建新操作记录")
+        }
+    }
+
+    private static func testModelCreateFolderUndoRedo() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let created = fixture.folder.appendingPathComponent("新建文件夹")
+        fixture.model.createFolder()
+        try check(FileManager.default.fileExists(atPath: created.path), "App 没有创建真实文件夹")
+        try check(fixture.model.operationRecords.last?.kind == .createFolder, "新建文件夹没有记录")
+        fixture.model.undoLastAction()
+        try check(!FileManager.default.fileExists(atPath: created.path), "Command+Z 没有撤销新建文件夹")
+        fixture.model.redoLastAction()
+        try check(FileManager.default.fileExists(atPath: created.path), "Shift+Command+Z 没有重做新建文件夹")
+    }
+
+    private static func testModelRenameUndoRedo() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let item = try require(fixture.model.items.first, "没有测试文件")
+        let expectedPosition = try require(fixture.model.positions[item.id], "没有原始位置")
+        let renamed = item.url.deletingLastPathComponent().appendingPathComponent("renamed.txt")
+        fixture.model.rename(item, to: renamed.lastPathComponent)
+        try check(FileManager.default.fileExists(atPath: renamed.path), "App 重命名没有生效")
+        try check(
+            fixture.model.positions[renamed.path] == expectedPosition,
+            "重命名后画布位置丢失：期望 \(expectedPosition)，实际 \(fixture.model.positions)"
+        )
+        fixture.model.undoLastAction()
+        try check(FileManager.default.fileExists(atPath: item.url.path), "撤销重命名没有恢复原路径")
+        try check(fixture.model.positions[item.id] == expectedPosition, "撤销重命名没有恢复位置")
+        fixture.model.redoLastAction()
+        try check(FileManager.default.fileExists(atPath: renamed.path), "重做重命名没有恢复新路径")
+    }
+
+    private static func testModelDuplicateUndoRedo() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let item = try require(fixture.model.items.first, "没有测试文件")
+        let duplicate = fixture.folder.appendingPathComponent("item-000 2.txt")
+        fixture.model.duplicate(item)
+        try check(FileManager.default.fileExists(atPath: duplicate.path), "制作副本没有创建真实文件")
+        fixture.model.undoLastAction()
+        try check(!FileManager.default.fileExists(atPath: duplicate.path), "撤销制作副本没有移除副本")
+        fixture.model.redoLastAction()
+        try check(FileManager.default.fileExists(atPath: duplicate.path), "重做制作副本没有恢复副本")
+    }
+
+    private static func testModelTrashUndoRestoresLayout() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let item = try require(fixture.model.items.first, "没有测试文件")
+        fixture.model.move(item, to: CGPoint(x: 650, y: 430))
+        let expected = try require(fixture.model.positions[item.id], "没有移动后位置")
+        fixture.model.trash(item)
+        try check(!FileManager.default.fileExists(atPath: item.url.path), "真实文件没有移至废纸篓")
+        fixture.model.undoLastAction()
+        try check(FileManager.default.fileExists(atPath: item.url.path), "撤销没有恢复真实文件")
+        try check(fixture.model.positions[item.id] == expected, "撤销删除没有恢复图标位置")
+        fixture.model.redoLastAction()
+        try check(!FileManager.default.fileExists(atPath: item.url.path), "重做没有再次移至废纸篓")
+    }
+
+    private static func testImportReplaceUndoRedo() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let target = fixture.folder.appendingPathComponent("report.txt")
+        let incomingFolder = fixture.base.appendingPathComponent("Incoming", isDirectory: true)
+        try FileManager.default.createDirectory(at: incomingFolder, withIntermediateDirectories: true)
+        let source = incomingFolder.appendingPathComponent("report.txt")
+        try Data("old".utf8).write(to: target)
+        try Data("new".utf8).write(to: source)
+        fixture.model.refreshItems()
+        fixture.model.importFiles([source])
+        try check(fixture.model.pendingConflict != nil, "导入冲突没有请求选择")
+        fixture.model.resolvePendingConflict(.replace)
+        let replaced = try String(contentsOf: target, encoding: .utf8)
+        try check(replaced == "new", "替换没有写入新文件")
+        fixture.model.undoLastAction()
+        let restored = try String(contentsOf: target, encoding: .utf8)
+        try check(restored == "old", "撤销替换没有恢复原文件")
+        fixture.model.redoLastAction()
+        let redone = try String(contentsOf: target, encoding: .utf8)
+        try check(redone == "new", "重做替换没有恢复新文件")
+    }
+
+    private static func testFileUndoSurvivesRestart() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let created = fixture.folder.appendingPathComponent("新建文件夹")
+        fixture.model.createFolder()
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false
+        )
+        reopened.open(folder: fixture.folder)
+        try check(reopened.canUndo, "重启后文件操作不能撤销")
+        reopened.undoLastAction()
+        try check(!FileManager.default.fileExists(atPath: created.path), "重启后没有撤销新建操作")
+    }
+
+    private static func testFileUndoAfterRootFolderMove() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        fixture.model.createFolder()
+        let movedFolder = fixture.base.appendingPathComponent("Moved Root", isDirectory: true)
+        try FileManager.default.moveItem(at: fixture.folder, to: movedFolder)
+        let movedCreated = movedFolder.appendingPathComponent("新建文件夹")
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: true,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false
+        )
+        try check(reopened.folderURL == movedFolder.standardizedFileURL, "根文件夹移动后没有自动恢复")
+        reopened.undoLastAction()
+        try check(!FileManager.default.fileExists(atPath: movedCreated.path), "根文件夹移动后文件撤销仍使用旧路径")
+    }
+
+    private static func testUnifiedUndoOrdering() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let item = try require(fixture.model.items.first, "没有测试文件")
+        let original = try require(fixture.model.positions[item.id], "没有初始位置")
+        fixture.model.move(item, to: CGPoint(x: 700, y: 500))
+        let moved = try require(fixture.model.positions[item.id], "没有移动位置")
+        let created = fixture.folder.appendingPathComponent("新建文件夹")
+        fixture.model.createFolder()
+
+        fixture.model.undoLastAction()
+        try check(!FileManager.default.fileExists(atPath: created.path), "统一撤销没有先撤销最新文件操作")
+        try check(fixture.model.positions[item.id] == moved, "撤销文件操作时误改了布局")
+        fixture.model.undoLastAction()
+        try check(fixture.model.positions[item.id] == original, "第二次撤销没有回退布局")
+
+        fixture.model.redoLastAction()
+        try check(fixture.model.positions[item.id] == moved, "统一重做没有先恢复布局")
+        fixture.model.redoLastAction()
+        try check(FileManager.default.fileExists(atPath: created.path), "统一重做没有再恢复文件操作")
+    }
+
+    private static func testLayoutUndoDepthMarksViewOnly() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let item = try require(fixture.model.items.first, "没有测试文件")
+        for index in 0..<51 {
+            fixture.model.setScale(index.isMultiple(of: 2) ? 1.0 : 1.25, for: item)
+        }
+        let layoutRecords = fixture.model.operationRecords.filter { $0.category == .layout }
+        try check(layoutRecords.count == 51, "布局历史数量不正确")
+        try check(layoutRecords.first?.state == .viewOnly, "超出撤销深度的布局仍标记为可撤销")
+        try check(layoutRecords.filter { $0.state == .applied }.count == 50, "可撤销布局数量没有限制为 50")
+    }
+
+    private static func testRenameConflictRequiresChoice() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let first = fixture.folder.appendingPathComponent("alpha")
+        let existing = fixture.folder.appendingPathComponent("beta")
+        try Data("alpha".utf8).write(to: first)
+        try Data("beta".utf8).write(to: existing)
+        fixture.model.refreshItems()
+        let item = try require(fixture.model.items.first(where: { $0.name == "alpha" }), "没有 alpha")
+        fixture.model.rename(item, to: "beta")
+        try check(fixture.model.pendingConflict != nil, "重命名冲突没有请求用户选择")
+        try check(FileManager.default.fileExists(atPath: first.path), "选择前就改动了源文件")
+        try check(FileManager.default.fileExists(atPath: existing.path), "选择前就覆盖了现有文件")
+        fixture.model.resolvePendingConflict(.keepBoth)
+        try check(FileManager.default.fileExists(atPath: fixture.folder.appendingPathComponent("beta 2").path), "保留两者没有创建唯一名称")
+        try check(FileManager.default.fileExists(atPath: existing.path), "保留两者覆盖了原文件")
+    }
+
+    private static func testDiagnosticsPrivacy() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let secretName = "秘密客户-张三-项目.xlsx"
+        try Data("secret".utf8).write(to: fixture.folder.appendingPathComponent(secretName))
+        fixture.model.refreshItems()
+        let item = try require(fixture.model.items.first, "诊断测试文件缺失")
+        fixture.model.move(item, to: CGPoint(x: 600, y: 400))
+        let data = try fixture.model.diagnosticsData()
+        let text = try require(String(data: data, encoding: .utf8), "诊断 JSON 不是 UTF-8")
+        try check(!text.contains(secretName), "诊断信息泄露了文件名")
+        try check(!text.contains(fixture.folder.path), "诊断信息泄露了完整路径")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(PrivacySafeDiagnostics.self, from: data)
+        try check(decoded.visibleItemCount == 1, "诊断项目数量不正确")
+    }
+
+    private static func testPendingOperationMarkedUnavailableOnRestart() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let exportURL = fixture.base.appendingPathComponent("layout.json")
+        try fixture.model.exportLayout(to: exportURL)
+        let canvas = try JSONDecoder().decode(SavedCanvas.self, from: Data(contentsOf: exportURL))
+        let rootID = try require(canvas.rootResourceID, "布局没有根标识")
+        let key = fixture.store.canvasKey(for: rootID)
+        let pending = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "未完成导入",
+            state: .pending,
+            actions: [.materialize(MaterializeAction(destinationPath: fixture.folder.appendingPathComponent("pending.txt").path))]
+        )
+        try fixture.operationStore.save(OperationHistoryDocument(records: [pending]), canvasKey: key)
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false
+        )
+        reopened.open(folder: fixture.folder)
+        try check(reopened.operationRecords.first?.state == .unavailable, "未完成操作没有标记为需核对")
+        let persisted = try fixture.operationStore.load(canvasKey: key)
+        try check(persisted.records.first?.state == .unavailable, "需核对状态没有持久化")
+    }
+
+    private static func testCorruptHistoryBlocksModelMutations() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let exportURL = fixture.base.appendingPathComponent("layout.json")
+        try fixture.model.exportLayout(to: exportURL)
+        let canvas = try JSONDecoder().decode(SavedCanvas.self, from: Data(contentsOf: exportURL))
+        let rootID = try require(canvas.rootResourceID, "布局没有根标识")
+        let key = fixture.store.canvasKey(for: rootID)
+        let historyURL = fixture.operationStore.historyURL(canvasKey: key)
+        try FileManager.default.createDirectory(at: historyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("broken".utf8).write(to: historyURL)
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false
+        )
+        reopened.open(folder: fixture.folder)
+        try check(reopened.operationHistoryIsBlocked, "App 没有识别损坏操作记录")
+        reopened.createFolder()
+        try check(
+            !FileManager.default.fileExists(atPath: fixture.folder.appendingPathComponent("新建文件夹").path),
+            "操作记录损坏时仍修改了真实文件"
+        )
+    }
+
     private static func testSeventyItemOverflow() throws {
         let fixture = try makeFixture(itemCount: 70, canvasSize: CGSize(width: 1728, height: 1117))
         defer { fixture.cleanup() }
@@ -203,6 +701,8 @@ struct SpatialFolderSelfTests {
         fixture.model.setLocked(true)
         let reopened = FolderCanvasModel(
             layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
@@ -284,6 +784,8 @@ struct SpatialFolderSelfTests {
 
         let reopened = FolderCanvasModel(
             layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: internalDisplay,
@@ -313,6 +815,8 @@ struct SpatialFolderSelfTests {
 
         let migrated = FolderCanvasModel(
             layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: external,
@@ -354,6 +858,8 @@ struct SpatialFolderSelfTests {
         try FileManager.default.moveItem(at: fixture.folder, to: movedFolder)
         let reopened = FolderCanvasModel(
             layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
             userDefaults: fixture.defaults,
             autoOpenLastFolder: true,
             initialCanvasSize: CGSize(width: 1024, height: 768),
@@ -412,8 +918,14 @@ struct SpatialFolderSelfTests {
         let defaults = try require(UserDefaults(suiteName: suite), "无法创建测试偏好设置")
         defaults.removePersistentDomain(forName: suite)
         let store = CanvasLayoutStore(layoutsDirectory: layouts, maximumBackups: 12)
+        let operationStore = OperationHistoryStore(directory: base.appendingPathComponent("Operations", isDirectory: true))
+        let fileOperationEngine = FileOperationEngine(
+            trashDirectoryForTesting: base.appendingPathComponent("Trash", isDirectory: true)
+        )
         let model = FolderCanvasModel(
             layoutStore: store,
+            operationStore: operationStore,
+            fileOperationEngine: fileOperationEngine,
             userDefaults: defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: canvasSize,
@@ -424,6 +936,8 @@ struct SpatialFolderSelfTests {
             base: base,
             folder: folder,
             store: store,
+            operationStore: operationStore,
+            fileOperationEngine: fileOperationEngine,
             defaults: defaults,
             defaultsSuite: suite,
             model: model
@@ -434,6 +948,7 @@ struct SpatialFolderSelfTests {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("SpatialFolder\(prefix)Tests-\(UUID().uuidString)", isDirectory: true)
     }
+
 }
 
 @MainActor
@@ -441,6 +956,8 @@ private struct ModelFixture {
     let base: URL
     let folder: URL
     let store: CanvasLayoutStore
+    let operationStore: OperationHistoryStore
+    let fileOperationEngine: FileOperationEngine
     let defaults: UserDefaults
     let defaultsSuite: String
     let model: FolderCanvasModel

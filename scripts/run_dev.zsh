@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
 CACHE="$ROOT/.build/module-cache"
-SCRATCH="$ROOT/.build/2.1.1"
+SCRATCH="$ROOT/.build/2.2"
 
 mkdir -p "$CACHE"
 cd "$ROOT"

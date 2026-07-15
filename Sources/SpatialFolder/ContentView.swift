@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject private var model: FolderCanvasModel
     @State private var resetConfirmationPresented = false
     @State private var referenceCanvasConfirmationPresented = false
+    @State private var historyPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,8 +44,25 @@ struct ContentView: View {
         .alert("空间文件夹", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("好", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
+        .alert(
+            model.pendingConflict?.title ?? "发现同名项目",
+            isPresented: Binding(
+                get: { model.pendingConflict != nil },
+                set: { if !$0, model.pendingConflict != nil { model.resolvePendingConflict(.cancel) } }
+            )
+        ) {
+            Button("保留两者") { model.resolvePendingConflict(.keepBoth) }
+            Button("替换", role: .destructive) { model.resolvePendingConflict(.replace) }
+            Button("取消", role: .cancel) { model.resolvePendingConflict(.cancel) }
+        } message: {
+            Text(model.pendingConflict?.message ?? "")
+        }
         .sheet(item: $model.infoItem) { item in
             FileInfoView(item: item)
+        }
+        .sheet(isPresented: $historyPresented) {
+            OperationHistoryView()
+                .environmentObject(model)
         }
         .alert("重置当前布局？", isPresented: $resetConfirmationPresented) {
             Button("取消", role: .cancel) {}
@@ -88,9 +106,9 @@ struct ContentView: View {
                 Menu {
                     Button(model.isLocked ? "解锁画布" : "锁定画布", action: model.toggleLocked)
                     Divider()
-                    Button("撤销布局修改", action: model.undoLayoutChange)
+                    Button("撤销上一步操作", action: model.undoLastAction)
                         .disabled(!model.canUndo)
-                    Button("重做布局修改", action: model.redoLayoutChange)
+                    Button("重做上一步操作", action: model.redoLastAction)
                         .disabled(!model.canRedo)
                     Button("找回越界项目", action: model.recoverOutOfBoundsItems)
                         .disabled(model.isLocked)
@@ -109,6 +127,10 @@ struct ContentView: View {
                 } label: {
                     Label(model.isLocked ? "已锁定" : "布局", systemImage: model.isLocked ? "lock.fill" : "square.grid.3x3")
                 }
+                Button { historyPresented = true } label: {
+                    Label("最近操作", systemImage: model.operationHistoryIsBlocked ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
+                }
+                .help(model.operationHistoryIsBlocked ? "操作记录需要修复" : "查看、撤销或重做最近操作")
                 if !model.inboxItems.isEmpty {
                     Menu {
                         Text("先把主画布项目移入待放置区，可腾出位置。")
@@ -132,6 +154,85 @@ struct ContentView: View {
         }
         .padding(12)
         .background(.bar)
+    }
+}
+
+private struct OperationHistoryView: View {
+    @EnvironmentObject private var model: FolderCanvasModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("最近操作").font(.title2.weight(.semibold))
+                    Text("文件操作记录会跨重启保留；布局撤销快照仅在本次运行期间有效。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+            Divider()
+
+            if model.operationHistoryIsBlocked {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+                    Text("操作记录无法读取。原记录已保留，为避免无法恢复的文件变更，真实文件修改已暂停。")
+                        .font(.callout)
+                    Spacer()
+                    VStack(alignment: .trailing) {
+                        Button("显示记录位置", action: model.revealOperationHistory)
+                        Button("存档损坏记录并继续…", action: model.archiveDamagedOperationHistoryAndContinue)
+                    }
+                }
+                .padding()
+                .background(Color.yellow.opacity(0.12))
+            }
+
+            List(Array(model.operationRecords.reversed())) { record in
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: record.category == .layout ? "square.grid.3x3" : "doc.badge.gearshape")
+                        .frame(width: 20)
+                        .foregroundStyle(record.state == .failed || record.state == .unavailable ? .orange : .secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(record.summary).fontWeight(.medium)
+                            Text(record.state.title)
+                                .font(.caption2.weight(.medium))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary, in: Capsule())
+                        }
+                        Text("\(record.kind.title) · \(record.transitionDate.formatted(date: .abbreviated, time: .standard))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let detail = record.detail {
+                            Text(detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+            }
+            .overlay {
+                if model.operationRecords.isEmpty {
+                    ContentUnavailableView("还没有操作记录", systemImage: "clock")
+                }
+            }
+
+            Divider()
+            HStack {
+                Button("撤销", action: model.undoLastAction).disabled(!model.canUndo)
+                Button("重做", action: model.redoLastAction).disabled(!model.canRedo)
+                Spacer()
+                Button("导出诊断信息…", action: model.exportDiagnostics)
+            }
+            .padding()
+        }
+        .frame(minWidth: 720, minHeight: 480)
     }
 }
 

@@ -21,6 +21,18 @@ private struct RecentFolderBookmark: Codable {
     var fallbackPath: String
 }
 
+private struct LayoutHistoryEntry {
+    var canvas: SavedCanvas
+    var operationID: UUID
+    var transitionDate: Date
+}
+
+struct PendingFileConflict: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 @MainActor
 final class FolderCanvasModel: ObservableObject {
     let mainCanvasCapacity = 64
@@ -34,6 +46,8 @@ final class FolderCanvasModel: ObservableObject {
     private let maximumUndoDepth = 50
     private let grid: CGFloat = 24
     private let layoutStore: CanvasLayoutStore
+    private let operationStore: OperationHistoryStore
+    private let fileOperationEngine: FileOperationEngine
     private let defaults: UserDefaults
     private let monitorFolders: Bool
 
@@ -52,6 +66,9 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var folderUnavailable = false
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
+    @Published private(set) var operationRecords: [OperationRecord] = []
+    @Published private(set) var operationHistoryIsBlocked = false
+    @Published var pendingConflict: PendingFileConflict?
     @Published private(set) var backupCount = 0
     @Published private(set) var canvasSize: CGSize
     @Published private(set) var currentDisplaySize: CGSize
@@ -72,17 +89,22 @@ final class FolderCanvasModel: ObservableObject {
     private var canvasKey: String?
     private var rootResourceID: String?
     private var lastFolderBookmark: Data?
-    private var undoStack: [SavedCanvas] = []
-    private var redoStack: [SavedCanvas] = []
+    private var undoStack: [LayoutHistoryEntry] = []
+    private var redoStack: [LayoutHistoryEntry] = []
+    private var conflictResolution: ((ConflictChoice) -> Void)?
 
     init(
         layoutStore: CanvasLayoutStore = CanvasLayoutStore(),
+        operationStore: OperationHistoryStore = OperationHistoryStore(),
+        fileOperationEngine: FileOperationEngine = FileOperationEngine(),
         userDefaults: UserDefaults = .standard,
         autoOpenLastFolder: Bool = true,
         initialCanvasSize: CGSize? = nil,
         monitorFolders: Bool = true
     ) {
         self.layoutStore = layoutStore
+        self.operationStore = operationStore
+        self.fileOperationEngine = fileOperationEngine
         defaults = userDefaults
         self.monitorFolders = monitorFolders
         let startingSize = initialCanvasSize ?? NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
@@ -166,10 +188,13 @@ final class FolderCanvasModel: ObservableObject {
         selectedIDs = []
         undoStack = []
         redoStack = []
-        updateUndoAvailability()
+        pendingConflict = nil
+        conflictResolution = nil
         folderUnavailable = false
         loadSavedCanvas()
+        loadOperationHistory()
         refreshItems()
+        updateUndoAvailability()
         if monitorFolders { watchFolder() }
     }
 
@@ -230,7 +255,7 @@ final class FolderCanvasModel: ObservableObject {
 
     func move(_ item: FolderItem, to point: CGPoint) {
         guard !isLocked, !inboxIDs.contains(item.id) else { return }
-        captureUndoSnapshot()
+        captureUndoSnapshot(summary: "移动图标")
         positions[item.id] = snapped(point, scale: scale(for: item))
         persist(makeBackup: true)
     }
@@ -241,7 +266,7 @@ final class FolderCanvasModel: ObservableObject {
 
     func setScale(_ scale: CGFloat, for item: FolderItem) {
         guard !isLocked else { return }
-        captureUndoSnapshot()
+        captureUndoSnapshot(summary: "调整图标和字体大小")
         let adjustedScale = min(max(scale, 0.7), 1.8)
         scales[item.id] = adjustedScale
         if let position = positions[item.id] {
@@ -314,7 +339,7 @@ final class FolderCanvasModel: ObservableObject {
             return
         }
         let moved = abs(dragTranslation.width) > 0.5 || abs(dragTranslation.height) > 0.5
-        if moved { captureUndoSnapshot() }
+        if moved { captureUndoSnapshot(summary: "移动所选图标") }
         for id in draggingIDs {
             guard let position = positions[id] else { continue }
             let itemScale = scales[id] ?? defaultIconScale
@@ -330,7 +355,7 @@ final class FolderCanvasModel: ObservableObject {
 
     func setLocked(_ locked: Bool) {
         guard isLocked != locked else { return }
-        captureUndoSnapshot()
+        captureUndoSnapshot(summary: locked ? "锁定画布" : "解锁画布")
         isLocked = locked
         persist(makeBackup: true)
     }
@@ -339,7 +364,7 @@ final class FolderCanvasModel: ObservableObject {
 
     func moveToInbox(_ item: FolderItem) {
         guard !isLocked, !inboxIDs.contains(item.id) else { return }
-        captureUndoSnapshot()
+        captureUndoSnapshot(summary: "移到待放置区")
         inboxIDs.insert(item.id)
         positions.removeValue(forKey: item.id)
         selectedIDs.remove(item.id)
@@ -354,7 +379,7 @@ final class FolderCanvasModel: ObservableObject {
             errorMessage = "主画布已经放满。请先把一个项目移到待放置区。"
             return
         }
-        captureUndoSnapshot()
+        captureUndoSnapshot(summary: "从待放置区放入画布")
         inboxIDs.remove(item.id)
         positions[item.id] = point
         persist(makeBackup: true)
@@ -363,13 +388,15 @@ final class FolderCanvasModel: ObservableObject {
     func recoverOutOfBoundsItems() {
         guard !isLocked else { return }
         let before = positions
-        captureUndoSnapshot()
+        let operationID = captureUndoSnapshot(summary: "找回越界项目")
         for item in items where !inboxIDs.contains(item.id) {
             guard let point = positions[item.id] else { continue }
             positions[item.id] = snapped(CGPoint(x: point.x, y: point.y), scale: scale(for: item))
         }
         if before == positions {
             undoStack.removeLast()
+            operationRecords.removeAll { $0.id == operationID }
+            persistOperationHistory()
             updateUndoAvailability()
             errorMessage = "当前没有越界项目。"
         } else {
@@ -390,7 +417,7 @@ final class FolderCanvasModel: ObservableObject {
             errorMessage = "当前显示器已经是基准画布。"
             return
         }
-        captureUndoSnapshot()
+        captureUndoSnapshot(summary: "重设基准画布")
         resizeLogicalCanvas(to: currentDisplaySize)
         _ = enforceCapacityAndBounds(items)
         persist(makeBackup: true)
@@ -399,25 +426,68 @@ final class FolderCanvasModel: ObservableObject {
     func undoLayoutChange() {
         guard let previous = undoStack.popLast() else { return }
         syncSavedCanvas()
-        redoStack.append(savedCanvas)
-        applySavedCanvas(previous)
+        let now = Date()
+        redoStack.append(LayoutHistoryEntry(
+            canvas: savedCanvas,
+            operationID: previous.operationID,
+            transitionDate: now
+        ))
+        applySavedCanvas(previous.canvas)
         reconcileAfterLayoutRestore()
         persist(makeBackup: true)
+        setOperationState(id: previous.operationID, state: .undone, transitionDate: now)
         updateUndoAvailability()
     }
 
     func redoLayoutChange() {
         guard let next = redoStack.popLast() else { return }
         syncSavedCanvas()
-        undoStack.append(savedCanvas)
-        applySavedCanvas(next)
+        let now = Date()
+        undoStack.append(LayoutHistoryEntry(
+            canvas: savedCanvas,
+            operationID: next.operationID,
+            transitionDate: now
+        ))
+        applySavedCanvas(next.canvas)
         reconcileAfterLayoutRestore()
         persist(makeBackup: true)
+        setOperationState(id: next.operationID, state: .applied, transitionDate: now)
         updateUndoAvailability()
     }
 
+    func undoLastAction() {
+        let layout = undoStack.last
+        let file = operationRecords
+            .filter { $0.isFileReversible && $0.state == .applied }
+            .max { $0.transitionDate < $1.transitionDate }
+        if let layout, file == nil || layout.transitionDate >= file!.transitionDate {
+            undoLayoutChange()
+        } else if let file {
+            transitionFileOperation(id: file.id, to: .undone, conflictChoice: .cancel)
+        }
+    }
+
+    func redoLastAction() {
+        let layout = redoStack.last
+        let file = operationRecords
+            .filter { $0.isFileReversible && $0.state == .undone }
+            .max { $0.transitionDate < $1.transitionDate }
+        if let layout, file == nil || layout.transitionDate >= file!.transitionDate {
+            redoLayoutChange()
+        } else if let file {
+            transitionFileOperation(id: file.id, to: .applied, conflictChoice: .cancel)
+        }
+    }
+
+    func resolvePendingConflict(_ choice: ConflictChoice) {
+        let resolution = conflictResolution
+        conflictResolution = nil
+        pendingConflict = nil
+        resolution?(choice)
+    }
+
     func resetLayout() {
-        if !layoutIsBlocked { captureUndoSnapshot() }
+        if !layoutIsBlocked { captureUndoSnapshot(summary: "重置当前布局") }
         layoutIsBlocked = false
         positions = [:]
         scales = [:]
@@ -429,7 +499,7 @@ final class FolderCanvasModel: ObservableObject {
     func restoreLatestBackup() {
         guard let canvasKey else { return }
         do {
-            if !layoutIsBlocked { captureUndoSnapshot() }
+            if !layoutIsBlocked { captureUndoSnapshot(summary: "恢复布局备份") }
             let restored = try layoutStore.restoreLatestBackup(canvasKey: canvasKey)
             layoutIsBlocked = false
             applySavedCanvas(restored)
@@ -472,6 +542,76 @@ final class FolderCanvasModel: ObservableObject {
         try layoutStore.export(savedCanvas, to: url)
     }
 
+    func diagnosticsData() throws -> Data {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        let report = PrivacySafeDiagnostics(
+            generatedAt: Date(),
+            appVersion: version,
+            macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            logicalCanvasSize: CanvasDimensions(canvasSize),
+            currentDisplaySize: CanvasDimensions(currentDisplaySize),
+            visibleItemCount: displayedItems.count,
+            inboxItemCount: inboxItems.count,
+            operationCount: operationRecords.count,
+            recentOperations: operationRecords.suffix(100).map { record in
+                DiagnosticOperation(
+                    category: record.category,
+                    kind: record.kind,
+                    state: record.state,
+                    occurredAt: record.transitionDate,
+                    actionCount: record.actions.count,
+                    errorType: record.detail == nil ? nil : "operation_error"
+                )
+            }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(report)
+    }
+
+    func exportDiagnostics() {
+        let panel = NSSavePanel()
+        panel.title = "导出隐私安全的诊断信息"
+        panel.nameFieldStringValue = "空间文件夹-诊断.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try diagnosticsData().write(to: url, options: .atomic)
+            errorMessage = "诊断信息已导出。内容不包含文件名或完整路径。"
+        } catch {
+            errorMessage = "无法导出诊断信息：\(error.localizedDescription)"
+        }
+    }
+
+    func revealOperationHistory() {
+        do {
+            try FileManager.default.createDirectory(at: operationStore.directory, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(operationStore.directory)
+        } catch {
+            errorMessage = "无法打开操作记录位置：\(error.localizedDescription)"
+        }
+    }
+
+    func archiveDamagedOperationHistoryAndContinue() {
+        guard operationHistoryIsBlocked, let canvasKey else { return }
+        let alert = NSAlert()
+        alert.messageText = "存档损坏记录并重新开始？"
+        alert.informativeText = "原操作记录会移入 Corrupt 存档目录，不会删除。重新开始后，旧操作不能在 App 内撤销，但真实文件不会被改动。"
+        alert.addButton(withTitle: "存档并继续")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            let archive = try operationStore.archiveCorruptHistoryAndReset(canvasKey: canvasKey)
+            operationRecords = []
+            operationHistoryIsBlocked = false
+            updateUndoAvailability()
+            errorMessage = "损坏记录已存档为“\(archive.lastPathComponent)”，可以继续使用。"
+        } catch {
+            errorMessage = "无法存档损坏操作记录：\(error.localizedDescription)"
+        }
+    }
+
     func importLayout() {
         let panel = NSOpenPanel()
         panel.title = "导入空间布局"
@@ -490,7 +630,7 @@ final class FolderCanvasModel: ObservableObject {
 
     func importLayout(from url: URL) throws {
         let imported = try layoutStore.importedCanvas(from: url, expectedRootResourceID: rootResourceID)
-        if !layoutIsBlocked { captureUndoSnapshot() }
+        if !layoutIsBlocked { captureUndoSnapshot(summary: "导入空间布局") }
         layoutIsBlocked = false
         applySavedCanvas(imported)
         reconcileAfterLayoutRestore()
@@ -568,6 +708,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func toggleTag(_ tag: String, for item: FolderItem) {
+        guard realFileMutationsAllowed() else { return }
         var tags = item.tags
         let normalized = normalizedTagName(tag)
         if let index = tags.firstIndex(where: { normalizedTagName($0) == normalized }) {
@@ -575,19 +716,40 @@ final class FolderCanvasModel: ObservableObject {
         } else {
             tags.append(tag)
         }
+        guard var record = beginFileOperation(
+            kind: .tags,
+            summary: "修改“\(item.name)”的标签",
+            itemNames: [item.name],
+            actions: [.tags(TagAction(path: item.url.path, before: item.tags, after: tags))]
+        ) else { return }
         do {
-            try (item.url as NSURL).setResourceValue(tags, forKey: URLResourceKey.tagNamesKey)
+            try writeFinderTags(tags, to: item.url)
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             refreshItems()
         } catch {
+            markOperationFailed(&record, error: error)
             errorMessage = "无法更新标签：\(error.localizedDescription)"
         }
     }
 
     func clearTags(for item: FolderItem) {
+        guard realFileMutationsAllowed(), !item.tags.isEmpty else { return }
+        guard var record = beginFileOperation(
+            kind: .tags,
+            summary: "清除“\(item.name)”的标签",
+            itemNames: [item.name],
+            actions: [.tags(TagAction(path: item.url.path, before: item.tags, after: []))]
+        ) else { return }
         do {
-            try (item.url as NSURL).setResourceValue([], forKey: URLResourceKey.tagNamesKey)
+            try writeFinderTags([], to: item.url)
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             refreshItems()
         } catch {
+            markOperationFailed(&record, error: error)
             errorMessage = "无法清除标签：\(error.localizedDescription)"
         }
     }
@@ -619,25 +781,42 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func duplicate(_ item: FolderItem) {
+        guard realFileMutationsAllowed() else { return }
+        let destination = uniqueDestination(for: item.url, in: item.url.deletingLastPathComponent())
+        guard var record = beginFileOperation(
+            kind: .duplicate,
+            summary: "制作“\(item.name)”的副本",
+            itemNames: [item.name],
+            actions: [.materialize(MaterializeAction(destinationPath: destination.path))]
+        ) else { return }
         do {
-            try FileManager.default.copyItem(
-                at: item.url,
-                to: uniqueDestination(for: item.url, in: item.url.deletingLastPathComponent())
-            )
+            try FileManager.default.copyItem(at: item.url, to: destination)
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             refreshItems()
+            captureCanvasMetadata(in: &record)
+            replaceOperationRecord(record)
         } catch {
+            markOperationFailed(&record, error: error)
             errorMessage = "无法复制文件：\(error.localizedDescription)"
         }
     }
 
     func compress(_ item: FolderItem) {
-        guard let folderURL else { return }
+        guard let folderURL, realFileMutationsAllowed() else { return }
         let archiveSource = folderURL
             .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent)
             .appendingPathExtension("zip")
         let archiveURL = uniqueDestination(for: archiveSource, in: folderURL)
         let sourcePath = item.url.path
         let archivePath = archiveURL.path
+        guard var record = beginFileOperation(
+            kind: .compress,
+            summary: "压缩“\(item.name)”",
+            itemNames: [item.name],
+            actions: [.materialize(MaterializeAction(destinationPath: archivePath))]
+        ) else { return }
         Task { [weak self] in
             let failure = await Task.detached { () -> String? in
                 do {
@@ -652,30 +831,101 @@ final class FolderCanvasModel: ObservableObject {
                 }
             }.value
             if let failure {
+                if FileManager.default.fileExists(atPath: archivePath) {
+                    try? FileManager.default.removeItem(atPath: archivePath)
+                }
+                record.state = .failed
+                record.transitionDate = Date()
+                record.detail = failure
+                self?.replaceOperationRecord(record)
                 self?.errorMessage = "无法压缩项目：\(failure)"
             } else {
+                record.state = .applied
+                record.transitionDate = Date()
+                self?.replaceOperationRecord(record)
                 self?.refreshItems()
+                self?.captureCanvasMetadata(in: &record)
+                self?.replaceOperationRecord(record)
             }
         }
     }
 
-    func importFiles(_ urls: [URL], move: Bool = false) {
-        guard let folderURL else { return }
-        do {
-            for source in urls where source.deletingLastPathComponent() != folderURL {
-                let target = uniqueDestination(for: source, in: folderURL)
-                if move { try FileManager.default.moveItem(at: source, to: target) }
-                else { try FileManager.default.copyItem(at: source, to: target) }
+    func importFiles(_ urls: [URL], move: Bool = false, conflictChoice: ConflictChoice? = nil) {
+        guard let folderURL, realFileMutationsAllowed() else { return }
+        let sources = urls.filter { $0.deletingLastPathComponent().standardizedFileURL != folderURL.standardizedFileURL }
+        guard !sources.isEmpty else { return }
+        let hasConflict = sources.contains {
+            FileManager.default.fileExists(atPath: folderURL.appendingPathComponent($0.lastPathComponent).path)
+        }
+        if hasConflict, conflictChoice == nil {
+            presentConflict(
+                title: "目标中已有同名项目",
+                message: sources.count == 1
+                    ? "“\(sources[0].lastPathComponent)”已经存在。请选择保留两者、替换现有项目或取消。"
+                    : "要导入的项目中存在同名文件。本次选择将应用到所有冲突项目。"
+            ) { [weak self] choice in
+                guard choice != .cancel else { return }
+                self?.importFiles(sources, move: move, conflictChoice: choice)
             }
+            return
+        }
+        let policy = conflictChoice ?? .cancel
+        guard var record = beginFileOperation(
+            kind: move ? .moveItems : .copyItems,
+            summary: move ? "移动 \(sources.count) 个项目到空间" : "复制 \(sources.count) 个项目到空间",
+            itemNames: sources.map(\.lastPathComponent)
+        ) else { return }
+        do {
+            for source in sources {
+                var target = folderURL.appendingPathComponent(source.lastPathComponent)
+                if FileManager.default.fileExists(atPath: target.path) {
+                    if policy == .keepBoth {
+                        target = uniqueDestination(for: source, in: folderURL)
+                    } else if policy == .replace {
+                        let trashURL = try trashItemRecordingResult(at: target)
+                        record.actions.append(.discard(DiscardAction(originalPath: target.path, trashPath: trashURL.path)))
+                        replaceOperationRecord(record)
+                    } else {
+                        throw FileOperationTransitionError.cancelled
+                    }
+                }
+                if move {
+                    try FileManager.default.moveItem(at: source, to: target)
+                    record.actions.append(.relocate(RelocateAction(originalPath: source.path, destinationPath: target.path)))
+                } else {
+                    try FileManager.default.copyItem(at: source, to: target)
+                    record.actions.append(.materialize(MaterializeAction(destinationPath: target.path)))
+                }
+                replaceOperationRecord(record)
+            }
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             refreshItems()
+            captureCanvasMetadata(in: &record)
+            replaceOperationRecord(record)
         } catch {
+            record.detail = error.localizedDescription
+            rollbackPendingOperation(&record)
             errorMessage = "无法导入文件：\(error.localizedDescription)"
         }
     }
 
     func trash(_ item: FolderItem) {
+        guard realFileMutationsAllowed() else { return }
+        guard var record = beginFileOperation(
+            kind: .trash,
+            summary: "将“\(item.name)”移至废纸篓",
+            itemNames: [item.name],
+            actions: [.discard(DiscardAction(originalPath: item.url.path))],
+            canvasItems: [canvasMetadata(for: item.id, actionIndex: 0)]
+        ) else { return }
         do {
-            try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
+            let trashURL = try trashItemRecordingResult(at: item.url)
+            record.actions[0] = .discard(DiscardAction(originalPath: item.url.path, trashPath: trashURL.path))
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             positions.removeValue(forKey: item.id)
             scales.removeValue(forKey: item.id)
             inboxIDs.remove(item.id)
@@ -683,25 +933,39 @@ final class FolderCanvasModel: ObservableObject {
             persist(makeBackup: true)
             refreshItems()
         } catch {
+            markOperationFailed(&record, error: error)
             errorMessage = "无法移至废纸篓：\(error.localizedDescription)"
         }
     }
 
     func createFolder() {
-        guard let folderURL else { return }
+        guard let folderURL, realFileMutationsAllowed() else { return }
         var name = "新建文件夹"
         var suffix = 2
         while FileManager.default.fileExists(atPath: folderURL.appendingPathComponent(name).path) {
             name = "新建文件夹 \(suffix)"
             suffix += 1
         }
+        let destination = folderURL.appendingPathComponent(name)
+        guard var record = beginFileOperation(
+            kind: .createFolder,
+            summary: "新建“\(name)”",
+            itemNames: [name],
+            actions: [.materialize(MaterializeAction(destinationPath: destination.path))]
+        ) else { return }
         do {
             try FileManager.default.createDirectory(
-                at: folderURL.appendingPathComponent(name),
+                at: destination,
                 withIntermediateDirectories: false
             )
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             refreshItems()
+            captureCanvasMetadata(in: &record)
+            replaceOperationRecord(record)
         } catch {
+            markOperationFailed(&record, error: error)
             errorMessage = "无法新建文件夹：\(error.localizedDescription)"
         }
     }
@@ -718,17 +982,51 @@ final class FolderCanvasModel: ObservableObject {
         createFromTemplate(resource: "BlankPresentation", baseName: "新建 PowerPoint 演示文稿", extension: "pptx")
     }
 
-    func rename(_ item: FolderItem, to name: String) {
-        guard !name.isEmpty else { return }
-        let newURL = item.url.deletingLastPathComponent().appendingPathComponent(name)
+    func rename(_ item: FolderItem, to name: String, conflictChoice: ConflictChoice? = nil) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, realFileMutationsAllowed() else { return }
+        var newURL = item.url.deletingLastPathComponent().appendingPathComponent(cleanName)
         guard newURL != item.url else { return }
+        if FileManager.default.fileExists(atPath: newURL.path), conflictChoice == nil {
+            presentConflict(
+                title: "名称已存在",
+                message: "“\(cleanName)”已经存在。请选择保留两者、替换现有项目或取消。"
+            ) { [weak self] choice in
+                guard choice != .cancel else { return }
+                self?.rename(item, to: cleanName, conflictChoice: choice)
+            }
+            return
+        }
+        var actions: [ReversibleFileAction] = []
+        if FileManager.default.fileExists(atPath: newURL.path), conflictChoice == .keepBoth {
+            newURL = uniqueDestination(for: newURL, in: newURL.deletingLastPathComponent())
+        }
+        guard var record = beginFileOperation(
+            kind: .rename,
+            summary: "将“\(item.name)”重命名为“\(newURL.lastPathComponent)”",
+            itemNames: [item.name, newURL.lastPathComponent]
+        ) else { return }
         do {
+            if FileManager.default.fileExists(atPath: newURL.path) {
+                guard conflictChoice == .replace else { throw FileOperationTransitionError.cancelled }
+                let trashURL = try trashItemRecordingResult(at: newURL)
+                actions.append(.discard(DiscardAction(originalPath: newURL.path, trashPath: trashURL.path)))
+            }
             try FileManager.default.moveItem(at: item.url, to: newURL)
+            actions.append(.relocate(RelocateAction(originalPath: item.url.path, destinationPath: newURL.path)))
+            record.actions = actions
+            record.canvasItems = [canvasMetadata(for: item.id, actionIndex: actions.count - 1)]
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             transferLayout(from: item.id, to: newURL.path)
             if let resourceID = item.resourceID { savedCanvas.resourcePaths[resourceID] = newURL.path }
             persist(makeBackup: true)
             refreshItems()
         } catch {
+            record.actions = actions
+            record.detail = error.localizedDescription
+            rollbackPendingOperation(&record)
             errorMessage = "无法重命名：\(error.localizedDescription)"
         }
     }
@@ -743,7 +1041,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func setWallpaper(_ url: URL?) {
-        captureUndoSnapshot()
+        captureUndoSnapshot(summary: url == nil ? "使用系统桌面壁纸" : "更换画布壁纸")
         wallpaperURL = url
         persist(makeBackup: true)
     }
@@ -754,6 +1052,154 @@ final class FolderCanvasModel: ObservableObject {
 
     func normalizedTagName(_ tag: String) -> String {
         tag.components(separatedBy: "\n").first ?? tag
+    }
+
+    private func beginFileOperation(
+        kind: OperationKind,
+        summary: String,
+        itemNames: [String],
+        actions: [ReversibleFileAction] = [],
+        canvasItems: [OperationCanvasItem] = []
+    ) -> OperationRecord? {
+        guard realFileMutationsAllowed() else { return nil }
+        let record = OperationRecord(
+            category: .file,
+            kind: kind,
+            summary: summary,
+            itemNames: itemNames,
+            state: .pending,
+            actions: actions,
+            canvasItems: canvasItems
+        )
+        appendOperationRecord(record)
+        return operationHistoryIsBlocked ? nil : record
+    }
+
+    private func markOperationFailed(_ record: inout OperationRecord, error: Error) {
+        record.state = .failed
+        record.transitionDate = Date()
+        record.detail = error.localizedDescription
+        replaceOperationRecord(record)
+    }
+
+    private func rollbackPendingOperation(_ record: inout OperationRecord) {
+        let originalDetail = record.detail
+        guard !record.actions.isEmpty else {
+            record.state = .failed
+            record.transitionDate = Date()
+            record.detail = originalDetail ?? "操作未完成。"
+            replaceOperationRecord(record)
+            return
+        }
+        do {
+            record.state = .applied
+            record = try fileOperationEngine.transition(record, to: .undone, conflictChoice: .replace)
+            record.state = .failed
+            record.detail = originalDetail ?? "操作失败，已回滚完成的文件变更。"
+        } catch {
+            record.state = .unavailable
+            record.detail = "操作失败且无法完整回滚：\(error.localizedDescription)。请在访达中核对。"
+        }
+        record.transitionDate = Date()
+        replaceOperationRecord(record)
+        refreshItems()
+    }
+
+    private func presentConflict(
+        title: String,
+        message: String,
+        resolution: @escaping (ConflictChoice) -> Void
+    ) {
+        pendingConflict = PendingFileConflict(title: title, message: message)
+        conflictResolution = resolution
+    }
+
+    private func transitionFileOperation(
+        id: UUID,
+        to targetState: OperationState,
+        conflictChoice: ConflictChoice
+    ) {
+        guard realFileMutationsAllowed(),
+              let record = operationRecords.first(where: { $0.id == id }) else { return }
+        do {
+            let updated = try fileOperationEngine.transition(
+                record,
+                to: targetState,
+                conflictChoice: conflictChoice
+            )
+            applyCanvasMetadata(from: record, updated: updated, targetState: targetState)
+            replaceOperationRecord(updated)
+            refreshItems()
+            persist(makeBackup: true)
+        } catch let conflict as FileOperationConflict {
+            presentConflict(
+                title: targetState == .undone ? "撤销时发现同名项目" : "重做时发现同名项目",
+                message: "\(conflict.localizedDescription)请选择保留两者、替换现有项目或取消。"
+            ) { [weak self] choice in
+                guard choice != .cancel else { return }
+                self?.transitionFileOperation(id: id, to: targetState, conflictChoice: choice)
+            }
+        } catch {
+            errorMessage = "无法\(targetState == .undone ? "撤销" : "重做")操作：\(error.localizedDescription)"
+        }
+    }
+
+    private func canvasMetadata(for path: String, actionIndex: Int) -> OperationCanvasItem {
+        OperationCanvasItem(
+            actionIndex: actionIndex,
+            position: positions[path],
+            scale: scales[path],
+            wasInInbox: inboxIDs.contains(path)
+        )
+    }
+
+    private func captureCanvasMetadata(in record: inout OperationRecord) {
+        var captured: [OperationCanvasItem] = []
+        for index in record.actions.indices {
+            guard let path = activePath(for: record.actions[index], state: .applied),
+                  items.contains(where: { $0.id == path }) else { continue }
+            captured.append(canvasMetadata(for: path, actionIndex: index))
+        }
+        record.canvasItems = captured
+    }
+
+    private func activePath(for action: ReversibleFileAction, state: OperationState) -> String? {
+        switch action {
+        case let .relocate(value):
+            return state == .undone ? value.originalPath : value.destinationPath
+        case let .materialize(value):
+            return state == .applied ? value.destinationPath : nil
+        case let .discard(value):
+            return state == .undone ? value.originalPath : nil
+        case let .tags(value):
+            return value.path
+        }
+    }
+
+    private func applyCanvasMetadata(
+        from previous: OperationRecord,
+        updated: OperationRecord,
+        targetState: OperationState
+    ) {
+        for index in previous.actions.indices {
+            if let oldPath = activePath(for: previous.actions[index], state: previous.state) {
+                positions.removeValue(forKey: oldPath)
+                scales.removeValue(forKey: oldPath)
+                inboxIDs.remove(oldPath)
+                selectedIDs.remove(oldPath)
+            }
+        }
+        for metadata in updated.canvasItems {
+            guard updated.actions.indices.contains(metadata.actionIndex),
+                  let path = activePath(for: updated.actions[metadata.actionIndex], state: targetState) else { continue }
+            if let position = metadata.position { positions[path] = position }
+            if let scale = metadata.scale { scales[path] = scale }
+            if metadata.wasInInbox { inboxIDs.insert(path) }
+        }
+    }
+
+    private func trashItemRecordingResult(at url: URL) throws -> URL {
+        try fileOperationEngine.moveToTrash(url)
     }
 
     private func loadSavedCanvas() {
@@ -835,17 +1281,177 @@ final class FolderCanvasModel: ObservableObject {
         }
     }
 
-    private func captureUndoSnapshot() {
+    @discardableResult
+    private func captureUndoSnapshot(summary: String = "调整画布布局") -> UUID {
         syncSavedCanvas()
-        undoStack.append(savedCanvas)
-        if undoStack.count > maximumUndoDepth { undoStack.removeFirst() }
-        redoStack = []
+        invalidateRedoHistory()
+        let record = OperationRecord(
+            category: .layout,
+            kind: .layout,
+            summary: summary,
+            state: .applied
+        )
+        appendOperationRecord(record, invalidatingRedo: false)
+        undoStack.append(LayoutHistoryEntry(
+            canvas: savedCanvas,
+            operationID: record.id,
+            transitionDate: record.transitionDate
+        ))
+        if undoStack.count > maximumUndoDepth {
+            let dropped = undoStack.removeFirst()
+            setOperationState(
+                id: dropped.operationID,
+                state: .viewOnly,
+                detail: "布局撤销深度已达上限；操作记录仍可查看。"
+            )
+        }
         updateUndoAvailability()
+        return record.id
     }
 
     private func updateUndoAvailability() {
-        canUndo = !undoStack.isEmpty
-        canRedo = !redoStack.isEmpty
+        canUndo = !undoStack.isEmpty || operationRecords.contains { $0.isFileReversible && $0.state == .applied }
+        canRedo = !redoStack.isEmpty || operationRecords.contains { $0.isFileReversible && $0.state == .undone }
+    }
+
+    private func loadOperationHistory() {
+        operationRecords = []
+        operationHistoryIsBlocked = false
+        guard let canvasKey else { return }
+        do {
+            var document = try operationStore.load(canvasKey: canvasKey)
+            var changed = remapOperationPathsToCurrentFolder(in: &document)
+            for index in document.records.indices {
+                if document.records[index].state == .pending {
+                    document.records[index].state = .unavailable
+                    document.records[index].transitionDate = Date()
+                    document.records[index].detail = "上次操作未能确认完成，请在访达中核对文件。"
+                    changed = true
+                } else if document.records[index].category == .layout,
+                          document.records[index].state == .applied || document.records[index].state == .undone {
+                    document.records[index].state = .viewOnly
+                    document.records[index].detail = "布局快照未跨重启保留；操作记录仍可查看。"
+                    changed = true
+                }
+            }
+            operationRecords = document.records
+            if changed { try operationStore.save(document, canvasKey: canvasKey) }
+        } catch {
+            operationHistoryIsBlocked = true
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func remapOperationPathsToCurrentFolder(in document: inout OperationHistoryDocument) -> Bool {
+        guard let folderURL else { return false }
+        let currentFolder = folderURL.standardizedFileURL
+        var changed = false
+
+        func pathInCurrentFolder(_ path: String) -> String {
+            currentFolder.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent).path
+        }
+
+        for recordIndex in document.records.indices {
+            for actionIndex in document.records[recordIndex].actions.indices {
+                switch document.records[recordIndex].actions[actionIndex] {
+                case var .relocate(value):
+                    let oldCanvasParent = URL(fileURLWithPath: value.destinationPath).deletingLastPathComponent().standardizedFileURL
+                    if oldCanvasParent != currentFolder {
+                        value.destinationPath = pathInCurrentFolder(value.destinationPath)
+                        if URL(fileURLWithPath: value.originalPath).deletingLastPathComponent().standardizedFileURL == oldCanvasParent {
+                            value.originalPath = pathInCurrentFolder(value.originalPath)
+                        }
+                        document.records[recordIndex].actions[actionIndex] = .relocate(value)
+                        changed = true
+                    }
+                case var .materialize(value):
+                    if URL(fileURLWithPath: value.destinationPath).deletingLastPathComponent().standardizedFileURL != currentFolder {
+                        value.destinationPath = pathInCurrentFolder(value.destinationPath)
+                        document.records[recordIndex].actions[actionIndex] = .materialize(value)
+                        changed = true
+                    }
+                case var .discard(value):
+                    if URL(fileURLWithPath: value.originalPath).deletingLastPathComponent().standardizedFileURL != currentFolder {
+                        value.originalPath = pathInCurrentFolder(value.originalPath)
+                        document.records[recordIndex].actions[actionIndex] = .discard(value)
+                        changed = true
+                    }
+                case var .tags(value):
+                    if URL(fileURLWithPath: value.path).deletingLastPathComponent().standardizedFileURL != currentFolder {
+                        value.path = pathInCurrentFolder(value.path)
+                        document.records[recordIndex].actions[actionIndex] = .tags(value)
+                        changed = true
+                    }
+                }
+            }
+            for displacementIndex in document.records[recordIndex].displacements.indices {
+                let old = document.records[recordIndex].displacements[displacementIndex].originalPath
+                if URL(fileURLWithPath: old).deletingLastPathComponent().standardizedFileURL != currentFolder {
+                    document.records[recordIndex].displacements[displacementIndex].originalPath = pathInCurrentFolder(old)
+                    changed = true
+                }
+            }
+        }
+        return changed
+    }
+
+    private func persistOperationHistory() {
+        guard !operationHistoryIsBlocked, let canvasKey else { return }
+        if operationRecords.count > 200 {
+            operationRecords = Array(operationRecords.suffix(200))
+        }
+        do {
+            try operationStore.save(
+                OperationHistoryDocument(records: operationRecords),
+                canvasKey: canvasKey
+            )
+        } catch {
+            operationHistoryIsBlocked = true
+            errorMessage = "无法保存操作记录：\(error.localizedDescription)。真实文件修改已被阻止。"
+        }
+    }
+
+    private func appendOperationRecord(_ record: OperationRecord, invalidatingRedo: Bool = true) {
+        if invalidatingRedo { invalidateRedoHistory() }
+        operationRecords.append(record)
+        persistOperationHistory()
+        updateUndoAvailability()
+    }
+
+    private func replaceOperationRecord(_ record: OperationRecord) {
+        guard let index = operationRecords.firstIndex(where: { $0.id == record.id }) else { return }
+        operationRecords[index] = record
+        persistOperationHistory()
+        updateUndoAvailability()
+    }
+
+    private func setOperationState(id: UUID, state: OperationState, transitionDate: Date = Date(), detail: String? = nil) {
+        guard let index = operationRecords.firstIndex(where: { $0.id == id }) else { return }
+        operationRecords[index].state = state
+        operationRecords[index].transitionDate = transitionDate
+        operationRecords[index].detail = detail
+        persistOperationHistory()
+    }
+
+    private func invalidateRedoHistory() {
+        let invalidatedIDs = Set(redoStack.map(\.operationID))
+        redoStack = []
+        for index in operationRecords.indices where
+            operationRecords[index].state == .undone || invalidatedIDs.contains(operationRecords[index].id) {
+            operationRecords[index].state = .superseded
+            operationRecords[index].transitionDate = Date()
+        }
+        if !invalidatedIDs.isEmpty || operationRecords.contains(where: { $0.state == .superseded }) {
+            persistOperationHistory()
+        }
+    }
+
+    private func realFileMutationsAllowed() -> Bool {
+        guard !operationHistoryIsBlocked else {
+            errorMessage = "操作记录需要修复。为了避免真实文件不可恢复，当前暂停新建、改名、覆盖和删除。"
+            return false
+        }
+        return true
     }
 
     private func updateBackupCount() {
@@ -1173,7 +1779,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func createFromTemplate(resource: String, baseName: String, extension fileExtension: String) {
-        guard let folderURL else { return }
+        guard let folderURL, realFileMutationsAllowed() else { return }
         guard let templateURL = Bundle.module.url(forResource: resource, withExtension: fileExtension) else {
             errorMessage = "找不到内置 \(fileExtension.uppercased()) 模板。"
             return
@@ -1184,10 +1790,22 @@ final class FolderCanvasModel: ObservableObject {
             index += 1
             targetURL = folderURL.appendingPathComponent("\(baseName) \(index).\(fileExtension)")
         }
+        guard var record = beginFileOperation(
+            kind: .createDocument,
+            summary: "新建“\(targetURL.lastPathComponent)”",
+            itemNames: [targetURL.lastPathComponent],
+            actions: [.materialize(MaterializeAction(destinationPath: targetURL.path))]
+        ) else { return }
         do {
             try FileManager.default.copyItem(at: templateURL, to: targetURL)
+            record.state = .applied
+            record.transitionDate = Date()
+            replaceOperationRecord(record)
             refreshItems()
+            captureCanvasMetadata(in: &record)
+            replaceOperationRecord(record)
         } catch {
+            markOperationFailed(&record, error: error)
             errorMessage = "无法新建文件：\(error.localizedDescription)"
         }
     }
