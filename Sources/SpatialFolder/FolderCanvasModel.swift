@@ -50,6 +50,8 @@ final class FolderCanvasModel: ObservableObject {
     private let fileOperationEngine: FileOperationEngine
     private let defaults: UserDefaults
     private let monitorFolders: Bool
+    private let sessionLockDirectory: URL
+    private let sessionLockingEnabled: Bool
 
     @Published private(set) var folderURL: URL?
     @Published private(set) var items: [FolderItem] = []
@@ -68,6 +70,8 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var canRedo = false
     @Published private(set) var operationRecords: [OperationRecord] = []
     @Published private(set) var operationHistoryIsBlocked = false
+    @Published private(set) var sessionIsReadOnly = false
+    @Published private(set) var sessionLockOwner: CanvasSessionOwner?
     @Published var pendingConflict: PendingFileConflict?
     @Published private(set) var backupCount = 0
     @Published private(set) var canvasSize: CGSize
@@ -92,6 +96,8 @@ final class FolderCanvasModel: ObservableObject {
     private var undoStack: [LayoutHistoryEntry] = []
     private var redoStack: [LayoutHistoryEntry] = []
     private var conflictResolution: ((ConflictChoice) -> Void)?
+    /// 持有对象即代表当前进程拥有这张画布的唯一写入权。
+    private var sessionLock: CanvasSessionLock?
 
     init(
         layoutStore: CanvasLayoutStore = CanvasLayoutStore(),
@@ -100,13 +106,17 @@ final class FolderCanvasModel: ObservableObject {
         userDefaults: UserDefaults = .standard,
         autoOpenLastFolder: Bool = true,
         initialCanvasSize: CGSize? = nil,
-        monitorFolders: Bool = true
+        monitorFolders: Bool = true,
+        sessionLockDirectory: URL = CanvasSessionLock.defaultLockDirectory(),
+        sessionLockingEnabled: Bool = true
     ) {
         self.layoutStore = layoutStore
         self.operationStore = operationStore
         self.fileOperationEngine = fileOperationEngine
         defaults = userDefaults
         self.monitorFolders = monitorFolders
+        self.sessionLockDirectory = sessionLockDirectory
+        self.sessionLockingEnabled = sessionLockingEnabled
         let startingSize = initialCanvasSize ?? NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
         canvasSize = startingSize
         currentDisplaySize = startingSize
@@ -141,6 +151,11 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     var desktopCanvasSize: CGSize { canvasSize }
+
+    /// 统一供界面和命令判断，避免只在按钮层禁用而底层仍然修改布局。
+    var canEditLayout: Bool {
+        folderURL != nil && !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly && !isLocked
+    }
 
     var defaultDesktopWallpaperURL: URL? {
         guard let screen = NSApp.keyWindow?.screen ?? NSScreen.main else { return nil }
@@ -179,9 +194,14 @@ final class FolderCanvasModel: ObservableObject {
         }
         folderMonitor?.cancel()
         refreshWorkItem?.cancel()
+        sessionLock?.release()
+        sessionLock = nil
+        sessionIsReadOnly = false
+        sessionLockOwner = nil
         folderURL = standardized
         rootResourceID = persistentResourceIdentifier(for: standardized) ?? "path:\(standardized.path)"
         canvasKey = rootResourceID.map(layoutStore.canvasKey(for:))
+        acquireSessionLock()
         lastFolderBookmark = makeBookmark(for: standardized)
         saveLastOpenedFolder(standardized)
         remember(folder: standardized)
@@ -254,7 +274,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func move(_ item: FolderItem, to point: CGPoint) {
-        guard !isLocked, !inboxIDs.contains(item.id) else { return }
+        guard canEditLayout, !inboxIDs.contains(item.id) else { return }
         captureUndoSnapshot(summary: "移动图标")
         positions[item.id] = snapped(point, scale: scale(for: item))
         persist(makeBackup: true)
@@ -265,7 +285,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func setScale(_ scale: CGFloat, for item: FolderItem) {
-        guard !isLocked else { return }
+        guard canEditLayout else { return }
         captureUndoSnapshot(summary: "调整图标和字体大小")
         let adjustedScale = min(max(scale, 0.7), 1.8)
         scales[item.id] = adjustedScale
@@ -322,7 +342,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func beginDragging(_ item: FolderItem) {
-        guard !isLocked, !inboxIDs.contains(item.id) else { return }
+        guard canEditLayout, !inboxIDs.contains(item.id) else { return }
         if !selectedIDs.contains(item.id) { selectedIDs = [item.id] }
         draggingIDs = selectedIDs
     }
@@ -333,7 +353,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func finishDrag() {
-        guard !isLocked, !draggingIDs.isEmpty else {
+        guard canEditLayout, !draggingIDs.isEmpty else {
             dragTranslation = .zero
             draggingIDs = []
             return
@@ -354,6 +374,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func setLocked(_ locked: Bool) {
+        guard !sessionIsReadOnly, !layoutIsBlocked, folderURL != nil else { return }
         guard isLocked != locked else { return }
         captureUndoSnapshot(summary: locked ? "锁定画布" : "解锁画布")
         isLocked = locked
@@ -363,7 +384,7 @@ final class FolderCanvasModel: ObservableObject {
     func toggleLocked() { setLocked(!isLocked) }
 
     func moveToInbox(_ item: FolderItem) {
-        guard !isLocked, !inboxIDs.contains(item.id) else { return }
+        guard canEditLayout, !inboxIDs.contains(item.id) else { return }
         captureUndoSnapshot(summary: "移到待放置区")
         inboxIDs.insert(item.id)
         positions.removeValue(forKey: item.id)
@@ -372,7 +393,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func placeFromInbox(_ item: FolderItem) {
-        guard !isLocked, inboxIDs.contains(item.id) else { return }
+        guard canEditLayout, inboxIDs.contains(item.id) else { return }
         let activeItems = items.filter { !inboxIDs.contains($0.id) && positions[$0.id] != nil }
         guard activeItems.count < mainCanvasCapacity,
               let point = nextAvailableGridPoint(for: item, among: activeItems) else {
@@ -386,7 +407,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func recoverOutOfBoundsItems() {
-        guard !isLocked else { return }
+        guard canEditLayout else { return }
         let before = positions
         let operationID = captureUndoSnapshot(summary: "找回越界项目")
         for item in items where !inboxIDs.contains(item.id) {
@@ -411,7 +432,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func setCurrentDisplayAsReferenceCanvas() {
-        guard folderURL != nil, !layoutIsBlocked, !isLocked else { return }
+        guard canEditLayout else { return }
         guard abs(canvasSize.width - currentDisplaySize.width) > 1 ||
                 abs(canvasSize.height - currentDisplaySize.height) > 1 else {
             errorMessage = "当前显示器已经是基准画布。"
@@ -424,7 +445,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func undoLayoutChange() {
-        guard let previous = undoStack.popLast() else { return }
+        guard !sessionIsReadOnly, let previous = undoStack.popLast() else { return }
         syncSavedCanvas()
         let now = Date()
         redoStack.append(LayoutHistoryEntry(
@@ -440,7 +461,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func redoLayoutChange() {
-        guard let next = redoStack.popLast() else { return }
+        guard !sessionIsReadOnly, let next = redoStack.popLast() else { return }
         syncSavedCanvas()
         let now = Date()
         undoStack.append(LayoutHistoryEntry(
@@ -487,6 +508,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func resetLayout() {
+        guard !sessionIsReadOnly else { return }
         if !layoutIsBlocked { captureUndoSnapshot(summary: "重置当前布局") }
         layoutIsBlocked = false
         positions = [:]
@@ -497,7 +519,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func restoreLatestBackup() {
-        guard let canvasKey else { return }
+        guard !sessionIsReadOnly, let canvasKey else { return }
         do {
             if !layoutIsBlocked { captureUndoSnapshot(summary: "恢复布局备份") }
             let restored = try layoutStore.restoreLatestBackup(canvasKey: canvasKey)
@@ -629,6 +651,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func importLayout(from url: URL) throws {
+        guard !sessionIsReadOnly else { return }
         let imported = try layoutStore.importedCanvas(from: url, expectedRootResourceID: rootResourceID)
         if !layoutIsBlocked { captureUndoSnapshot(summary: "导入空间布局") }
         layoutIsBlocked = false
@@ -656,7 +679,7 @@ final class FolderCanvasModel: ObservableObject {
         guard Self.directoryExists(at: replacement) else { return }
         let previous = savedCanvas
         open(folder: replacement)
-        guard preservingCurrentLayout else { return }
+        guard preservingCurrentLayout, !sessionIsReadOnly else { return }
         var transferred = remappedCanvas(previous, to: replacement.standardizedFileURL, matching: items)
         transferred.rootResourceID = rootResourceID
         transferred.resourcePaths = [:]
@@ -1041,6 +1064,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func setWallpaper(_ url: URL?) {
+        guard canEditLayout else { return }
         captureUndoSnapshot(summary: url == nil ? "使用系统桌面壁纸" : "更换画布壁纸")
         wallpaperURL = url
         persist(makeBackup: true)
@@ -1271,7 +1295,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func persist(makeBackup: Bool) {
-        guard !layoutIsBlocked, let canvasKey else { return }
+        guard !layoutIsBlocked, !sessionIsReadOnly, let canvasKey else { return }
         syncSavedCanvas()
         do {
             try layoutStore.save(savedCanvas, canvasKey: canvasKey, makeBackup: makeBackup)
@@ -1335,7 +1359,7 @@ final class FolderCanvasModel: ObservableObject {
                 }
             }
             operationRecords = document.records
-            if changed { try operationStore.save(document, canvasKey: canvasKey) }
+            if changed, !sessionIsReadOnly { try operationStore.save(document, canvasKey: canvasKey) }
         } catch {
             operationHistoryIsBlocked = true
             errorMessage = error.localizedDescription
@@ -1396,7 +1420,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func persistOperationHistory() {
-        guard !operationHistoryIsBlocked, let canvasKey else { return }
+        guard !operationHistoryIsBlocked, !sessionIsReadOnly, let canvasKey else { return }
         if operationRecords.count > 200 {
             operationRecords = Array(operationRecords.suffix(200))
         }
@@ -1447,11 +1471,39 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func realFileMutationsAllowed() -> Bool {
+        guard !sessionIsReadOnly else {
+            errorMessage = "这个空间正在被另一个空间文件夹进程使用。当前窗口为只读模式，请先退出占用它的旧版本。"
+            return false
+        }
         guard !operationHistoryIsBlocked else {
             errorMessage = "操作记录需要修复。为了避免真实文件不可恢复，当前暂停新建、改名、覆盖和删除。"
             return false
         }
         return true
+    }
+
+    /// 尝试取得画布独占写入权。失败时仍允许浏览和打开文件，但所有写操作都被模型层阻止。
+    private func acquireSessionLock() {
+        guard sessionLockingEnabled, let canvasKey else { return }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        do {
+            switch try CanvasSessionLock.acquire(
+                canvasKey: canvasKey,
+                directory: sessionLockDirectory,
+                appVersion: version
+            ) {
+            case let .acquired(lock):
+                sessionLock = lock
+            case let .occupied(owner):
+                sessionIsReadOnly = true
+                sessionLockOwner = owner
+                let ownerText = owner.map { "（进程 \($0.processID)，版本 \($0.appVersion)）" } ?? ""
+                errorMessage = "这个空间已被另一个空间文件夹占用\(ownerText)。当前以只读方式打开。"
+            }
+        } catch {
+            sessionIsReadOnly = true
+            errorMessage = "无法取得空间写入锁，已切换为只读模式：\(error.localizedDescription)"
+        }
     }
 
     private func updateBackupCount() {

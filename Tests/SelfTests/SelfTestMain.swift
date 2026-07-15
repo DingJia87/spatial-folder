@@ -31,6 +31,9 @@ struct SpatialFolderSelfTests {
         run("恢复冲突替换后可逆") { try testConflictReplaceRoundTrip() }
         run("多项撤销预检防止部分执行") { try testMultiActionPreflightPreventsPartialUndo() }
         run("损坏操作记录阻止静默覆盖") { try testCorruptOperationHistoryBlocks() }
+        run("画布跨进程锁独占与释放") { try testCanvasSessionLockExclusivity() }
+        run("第二个画布模型进入只读模式") { try testSecondModelUsesReadOnlySession() }
+        run("2.3.2 偏好迁移到稳定版本") { try testPreferencesMigration() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
         run("App 重命名恢复路径与画布位置") { try testModelRenameUndoRedo() }
         run("App 制作副本统一撤销重做") { try testModelDuplicateUndoRedo() }
@@ -388,6 +391,144 @@ struct SpatialFolderSelfTests {
         }
     }
 
+    private static func testCanvasSessionLockExclusivity() throws {
+        let directory = temporaryDirectory(prefix: "SessionLock")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let firstResult = try CanvasSessionLock.acquire(
+            canvasKey: "canvas-a",
+            directory: directory,
+            processID: 111,
+            appVersion: "2.4-test"
+        )
+        guard case let .acquired(firstLock) = firstResult else {
+            throw SelfTestFailure(description: "第一次没有取得画布锁")
+        }
+
+        let secondResult = try CanvasSessionLock.acquire(
+            canvasKey: "canvas-a",
+            directory: directory,
+            processID: 222,
+            appVersion: "2.4-test"
+        )
+        guard case let .occupied(owner) = secondResult else {
+            throw SelfTestFailure(description: "第二个会话错误取得了同一张画布的写入锁")
+        }
+        try check(owner?.processID == 111, "锁占用者信息没有正确保存")
+
+        firstLock.release()
+        let thirdResult = try CanvasSessionLock.acquire(
+            canvasKey: "canvas-a",
+            directory: directory,
+            processID: 333,
+            appVersion: "2.4-test"
+        )
+        guard case .acquired = thirdResult else {
+            throw SelfTestFailure(description: "原会话释放后仍无法取得画布锁")
+        }
+    }
+
+    private static func testSecondModelUsesReadOnlySession() throws {
+        let base = temporaryDirectory(prefix: "ModelSessionLock")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = base.appendingPathComponent("Root", isDirectory: true)
+        let locks = base.appendingPathComponent("Locks", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        let layoutStore = CanvasLayoutStore(layoutsDirectory: base.appendingPathComponent("Layouts"))
+        let operationStore = OperationHistoryStore(directory: base.appendingPathComponent("Operations"))
+        let fileEngine = FileOperationEngine(trashDirectoryForTesting: base.appendingPathComponent("Trash"))
+        let writerDefaults = try require(UserDefaults(suiteName: "SessionWriter.\(UUID().uuidString)"), "无法创建写会话偏好")
+        let readerDefaults = try require(UserDefaults(suiteName: "SessionReader.\(UUID().uuidString)"), "无法创建读会话偏好")
+
+        var writer: FolderCanvasModel? = FolderCanvasModel(
+            layoutStore: layoutStore,
+            operationStore: operationStore,
+            fileOperationEngine: fileEngine,
+            userDefaults: writerDefaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockDirectory: locks
+        )
+        writer?.open(folder: folder)
+        try check(writer?.sessionIsReadOnly == false, "第一个模型错误进入只读模式")
+
+        let reader = FolderCanvasModel(
+            layoutStore: layoutStore,
+            operationStore: operationStore,
+            fileOperationEngine: fileEngine,
+            userDefaults: readerDefaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockDirectory: locks
+        )
+        reader.open(folder: folder)
+        try check(reader.sessionIsReadOnly, "第二个模型没有进入只读模式")
+        reader.createFolder()
+        try check(
+            !FileManager.default.fileExists(atPath: folder.appendingPathComponent("新建文件夹").path),
+            "只读会话仍然修改了真实文件"
+        )
+
+        writer = nil
+        let successor = FolderCanvasModel(
+            layoutStore: layoutStore,
+            operationStore: operationStore,
+            fileOperationEngine: fileEngine,
+            userDefaults: writerDefaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockDirectory: locks
+        )
+        successor.open(folder: folder)
+        try check(!successor.sessionIsReadOnly, "写会话结束后新模型仍被错误阻止")
+    }
+
+    private static func testPreferencesMigration() throws {
+        let destinationName = "PreferencesDestination.\(UUID().uuidString)"
+        let newestName = "Preferences232.\(UUID().uuidString)"
+        let olderName = "Preferences231.\(UUID().uuidString)"
+        let destination = try require(UserDefaults(suiteName: destinationName), "无法创建目标偏好")
+        let newest = try require(UserDefaults(suiteName: newestName), "无法创建新版偏好")
+        let older = try require(UserDefaults(suiteName: olderName), "无法创建旧版偏好")
+        defer {
+            destination.removePersistentDomain(forName: destinationName)
+            newest.removePersistentDomain(forName: newestName)
+            older.removePersistentDomain(forName: olderName)
+        }
+        destination.removePersistentDomain(forName: destinationName)
+        newest.removePersistentDomain(forName: newestName)
+        older.removePersistentDomain(forName: olderName)
+
+        destination.set("dark", forKey: "appearanceMode")
+        newest.set("/tmp/latest", forKey: "lastOpenedFolderPath")
+        newest.set(["/tmp/latest"], forKey: "recentFolderPaths")
+        older.set("/tmp/older", forKey: "lastOpenedFolderPath")
+
+        let report = PreferencesMigrator.migrateIfNeeded(
+            destination: destination,
+            sources: [(newestName, newest), (olderName, older)]
+        )
+        try check(destination.string(forKey: "appearanceMode") == "dark", "迁移覆盖了 2.4 已有设置")
+        try check(destination.string(forKey: "lastOpenedFolderPath") == "/tmp/latest", "没有优先采用 2.3.2 设置")
+        try check(destination.stringArray(forKey: "recentFolderPaths") == ["/tmp/latest"], "最近空间没有迁移")
+        try check(report.sourceDomains == [newestName], "迁移来源记录不正确")
+        try check(
+            destination.integer(forKey: PreferencesMigrator.migrationVersionKey) == PreferencesMigrator.currentMigrationVersion,
+            "迁移版本没有写入"
+        )
+
+        newest.set("/tmp/changed", forKey: "lastOpenedFolderPath")
+        _ = PreferencesMigrator.migrateIfNeeded(
+            destination: destination,
+            sources: [(newestName, newest)]
+        )
+        try check(destination.string(forKey: "lastOpenedFolderPath") == "/tmp/latest", "重复迁移改变了已完成结果")
+    }
+
     private static func testModelCreateFolderUndoRedo() throws {
         let fixture = try makeFixture(itemCount: 0)
         defer { fixture.cleanup() }
@@ -483,7 +624,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.canUndo, "重启后文件操作不能撤销")
@@ -505,7 +647,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: true,
             initialCanvasSize: CGSize(width: 1024, height: 768),
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         try check(reopened.folderURL == movedFolder.standardizedFileURL, "根文件夹移动后没有自动恢复")
         reopened.undoLastAction()
@@ -606,7 +749,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.operationRecords.first?.state == .unavailable, "未完成操作没有标记为需核对")
@@ -632,7 +776,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.operationHistoryIsBlocked, "App 没有识别损坏操作记录")
@@ -712,7 +857,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.isLocked, "重新打开文件夹后锁定状态丢失")
@@ -881,7 +1027,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: internalDisplay,
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         reopened.open(folder: fixture.folder)
         let reopenedItem = try require(reopened.items.first, "重启后项目缺失")
@@ -912,7 +1059,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: external,
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         migrated.open(folder: fixture.folder)
         let migratedItem = try require(migrated.items.first, "迁移后项目缺失")
@@ -955,7 +1103,8 @@ struct SpatialFolderSelfTests {
             userDefaults: fixture.defaults,
             autoOpenLastFolder: true,
             initialCanvasSize: CGSize(width: 1024, height: 768),
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockingEnabled: false
         )
         defer { fixture.cleanup() }
         try check(reopened.folderURL?.standardizedFileURL == movedFolder.standardizedFileURL, "移动后没有恢复新路径")
@@ -1021,7 +1170,9 @@ struct SpatialFolderSelfTests {
             userDefaults: defaults,
             autoOpenLastFolder: false,
             initialCanvasSize: canvasSize,
-            monitorFolders: false
+            monitorFolders: false,
+            sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
+            sessionLockingEnabled: false
         )
         model.open(folder: folder)
         return ModelFixture(

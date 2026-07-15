@@ -2,7 +2,13 @@ import SwiftUI
 
 @main
 struct SpatialFolderApp: App {
-    @StateObject private var model = FolderCanvasModel()
+    @StateObject private var model: FolderCanvasModel
+
+    init() {
+        // 2.4 起使用稳定 Bundle ID；构造模型前先迁移旧测试版的最近空间和外观设置。
+        PreferencesMigrator.migrateIfNeeded()
+        _model = StateObject(wrappedValue: FolderCanvasModel())
+    }
 
     var body: some Scene {
         WindowGroup("空间文件夹") {
