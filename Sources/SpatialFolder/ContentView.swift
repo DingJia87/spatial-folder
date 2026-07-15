@@ -271,10 +271,15 @@ private struct FolderCanvasView: View {
                 viewportWidth: geometry.size.width,
                 displaySize: model.currentDisplaySize
             )
+            let presentationSize = CanvasViewport.presentationSize(
+                logicalSize: model.desktopCanvasSize,
+                viewportSize: geometry.size,
+                displayScale: displayScale
+            )
             ScrollView(.vertical) {
                 ZStack(alignment: .topLeading) {
                     CanvasBackground(url: model.wallpaperURL ?? model.defaultDesktopWallpaperURL)
-                        .frame(width: model.desktopCanvasSize.width, height: model.desktopCanvasSize.height)
+                        .frame(width: presentationSize.width, height: presentationSize.height)
                         .contentShape(Rectangle())
                         .onTapGesture { model.clearSelection() }
                         .gesture(selectionGesture)
@@ -290,11 +295,11 @@ private struct FolderCanvasView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .frame(width: model.desktopCanvasSize.width,
-                       height: model.desktopCanvasSize.height)
+                .frame(width: presentationSize.width,
+                       height: presentationSize.height)
                 .scaleEffect(displayScale, anchor: .topLeading)
-                .frame(width: model.desktopCanvasSize.width * displayScale,
-                       height: model.desktopCanvasSize.height * displayScale,
+                .frame(width: presentationSize.width * displayScale,
+                       height: presentationSize.height * displayScale,
                        alignment: .topLeading)
                 .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: receiveDroppedFiles)
                 .contextMenu {

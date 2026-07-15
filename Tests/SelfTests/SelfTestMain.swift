@@ -51,6 +51,8 @@ struct SpatialFolderSelfTests {
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
         run("跨屏往返不改写布局") { try testScreenSwitchDoesNotMutateLayout() }
         run("小屏视口统一缩放") { try testViewportScaleIsUniform() }
+        run("全屏额外高度由画布背景覆盖") { try testPresentationCoversTallerViewport() }
+        run("小视口不会缩短逻辑画布") { try testPresentationNeverShrinksLogicalCanvas() }
         run("普通窗口按宽度保持画布比例") { try testWindowAspectTracksWidth() }
         run("普通窗口按高度保持画布比例") { try testWindowAspectTracksHeight() }
         run("窗口比例受当前显示器范围限制") { try testWindowAspectFitsCurrentDisplay() }
@@ -753,6 +755,30 @@ struct SpatialFolderSelfTests {
         let iconWidth = 104.0 * scale
         let spacing = 320.0 * scale
         try check(abs(iconWidth / spacing - 104.0 / 320.0) < 0.000_001, "图标和间距比例不一致")
+    }
+
+    private static func testPresentationCoversTallerViewport() throws {
+        let logical = CGSize(width: 2560, height: 1440)
+        let viewport = CGSize(width: 2048, height: 1300)
+        let scale: CGFloat = 0.8
+        let presentation = CanvasViewport.presentationSize(
+            logicalSize: logical,
+            viewportSize: viewport,
+            displayScale: scale
+        )
+        try check(abs(presentation.width * scale - viewport.width) < 0.001, "背景没有覆盖视口宽度")
+        try check(abs(presentation.height * scale - viewport.height) < 0.001, "背景没有覆盖全屏额外高度")
+        try check(presentation.height > logical.height, "较高视口没有扩展显示背景")
+    }
+
+    private static func testPresentationNeverShrinksLogicalCanvas() throws {
+        let logical = CGSize(width: 2560, height: 1440)
+        let presentation = CanvasViewport.presentationSize(
+            logicalSize: logical,
+            viewportSize: CGSize(width: 1200, height: 700),
+            displayScale: 0.8
+        )
+        try check(presentation == logical, "较小视口缩短了逻辑画布")
     }
 
     private static func testWindowAspectTracksWidth() throws {
