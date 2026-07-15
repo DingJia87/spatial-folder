@@ -57,3 +57,20 @@
 ## 完成定义
 
 只有当 R1—R10 均有对应代码、测试或运行证据，全部自动测试通过，严格 Release 构建通过，并完成独立 2.4 App 的普通窗口、最大化、全屏和文件操作冒烟验证时，2.4 才视为完成。
+
+## 实施结果
+
+| 编号 | 状态 | 已完成证据 |
+|---|---|---|
+| R1 | 完成 | `CanvasSessionLock` + 跨锁/双模型只读测试 |
+| R2 | 完成 | 稳定 Bundle ID + `PreferencesMigrator` + 2.3.2 偏好迁移测试 |
+| R3 | 完成 | `FolderScanService`、按需图标、后台壁纸解码 + 3,000 项测试 |
+| R4 | 完成 | `FileOperationCoordinator`、进度/取消、逐步落账、失败回滚和异步模型测试 |
+| R5 | 完成 | `DroppedURLCollector` 聚合全部 provider 后一次导入 |
+| R6 | 完成 | 多选右键批量 API、自动测试和 GUI 菜单验证 |
+| R7 | 完成 | 统一吸附/限位位移 + 相对位置与边界测试 |
+| R8 | 完成 | 可搜索、多选、批量放回的 `InboxPanelView` + GUI 验证 |
+| R9 | 完成 | 6 项 `swift test`、56 项完整回归、GitHub Actions 严格 Release 构建 |
+| R10 | 完成 | 新模块中文注释、主模型职责分区、`MAINTENANCE_2.4.md` |
+
+最终验证已覆盖：严格 Debug/Release 编译、App 本地签名、ZIP 解压后签名、70 项 64+6 布局、反向框选、多选右键、批量副本与撤销、普通窗口、最大化和系统全屏。GUI 使用隔离测试目录，结束后恢复原工作空间并清理测试数据。

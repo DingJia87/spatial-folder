@@ -43,8 +43,7 @@ enum WindowAspectSizing {
             max(0, maximumSize.height - chromeHeight) / canvasSize.height
         )
 
-        // Fitting on the current screen takes precedence if the configured minimum
-        // window size cannot fit on a particularly small display.
+        // 如果配置的最小窗口在小屏幕上放不下，以“能完整落在当前屏幕”为最高优先级。
         let lowerBound = min(minimumScale, maximumScale)
         let scale = min(max(proposedScale, lowerBound), maximumScale)
         return CGSize(

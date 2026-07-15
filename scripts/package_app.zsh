@@ -2,17 +2,26 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-RELEASE_DIR="$ROOT/Release"
-APP_NAME="空间文件夹 2.3.2 测试版"
+source "$ROOT/config/release.env"
+RELEASE_DIR="$ROOT/Release/$MARKETING_VERSION"
+APP_NAME="$PRODUCT_NAME"
 APP="$RELEASE_DIR/$APP_NAME.app"
-ZIP="$RELEASE_DIR/空间文件夹-v2.3.2-测试版.zip"
-SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
+ZIP="$RELEASE_DIR/$PRODUCT_NAME-v$MARKETING_VERSION.zip"
+SDK="$(xcrun --sdk macosx --show-sdk-path)"
 CACHE="$ROOT/.build/module-cache"
-SCRATCH="$ROOT/.build/2.3.2-release"
+SCRATCH="$ROOT/.build/$MARKETING_VERSION-release"
 
-if [[ ! -d "$SDK" ]]; then
-    SDK="$(xcrun --sdk macosx --show-sdk-path)"
-fi
+# 打包前先校验版本源与 Info.plist，防止产物名称是 2.4、内部版本却仍是旧值。
+PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Assets/Info.plist")"
+PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Assets/Info.plist")"
+[[ "$PLIST_VERSION" == "$MARKETING_VERSION" ]] || {
+    echo "Info.plist 版本 $PLIST_VERSION 与 release.env $MARKETING_VERSION 不一致" >&2
+    exit 1
+}
+[[ "$PLIST_BUILD" == "$BUILD_NUMBER" ]] || {
+    echo "Info.plist 构建号 $PLIST_BUILD 与 release.env $BUILD_NUMBER 不一致" >&2
+    exit 1
+}
 
 mkdir -p "$RELEASE_DIR" "$CACHE"
 cd "$ROOT"
@@ -35,7 +44,7 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
-VERIFY_DIR="$(mktemp -d /tmp/spatial-folder-2.3.2-verify.XXXXXX)"
+VERIFY_DIR="$(mktemp -d /tmp/spatial-folder-$MARKETING_VERSION-verify.XXXXXX)"
 trap 'rm -rf "$VERIFY_DIR"' EXIT
 ditto -x -k "$ZIP" "$VERIFY_DIR"
 codesign --verify --deep --strict --verbose=2 "$VERIFY_DIR/$APP_NAME.app"

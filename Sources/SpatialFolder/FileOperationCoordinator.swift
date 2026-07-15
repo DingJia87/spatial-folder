@@ -8,6 +8,7 @@ struct FileTransferPlan: Equatable, Sendable {
     let replacesExistingDestination: Bool
 }
 
+/// 描述一次压缩的来源和预先占用的目标 ZIP，避免批量中途重新计算文件名。
 struct FileCompressionPlan: Equatable, Sendable {
     let source: URL
     let destination: URL

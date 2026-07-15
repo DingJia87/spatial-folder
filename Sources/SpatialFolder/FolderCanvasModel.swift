@@ -32,6 +32,10 @@ struct PendingFileConflict: Identifiable, Equatable {
     let message: String
 }
 
+/// 画布的主线程编排模型。
+///
+/// 它保存界面需要观察的状态，并把布局仓库、后台扫描、文件操作协调器和会话锁连接起来。
+/// 耗时 I/O 必须交给独立 service/actor，不能直接塞回这个类型的主线程方法。
 @MainActor
 final class FolderCanvasModel: ObservableObject {
     let mainCanvasCapacity = 64
@@ -193,6 +197,8 @@ final class FolderCanvasModel: ObservableObject {
             $0.tags.contains { normalizedTagName($0).localizedCaseInsensitiveContains(query) }
         }
     }
+
+    // MARK: - 外观、空间打开与目录扫描
 
     func setAppearanceMode(_ mode: String) {
         appearanceMode = mode
@@ -371,6 +377,8 @@ final class FolderCanvasModel: ObservableObject {
         persist(makeBackup: true)
     }
 
+    // MARK: - 选择、框选和整体拖动
+
     func select(_ item: FolderItem, extendingSelection: Bool) {
         guard !inboxIDs.contains(item.id) else { return }
         if extendingSelection {
@@ -473,6 +481,8 @@ final class FolderCanvasModel: ObservableObject {
             height: min(maximumDY, max(minimumDY, snappedDY))
         )
     }
+
+    // MARK: - 画布布局命令
 
     func setLocked(_ locked: Bool) {
         guard !sessionIsReadOnly, !layoutIsBlocked, folderURL != nil else { return }
@@ -621,6 +631,8 @@ final class FolderCanvasModel: ObservableObject {
         setOperationState(id: next.operationID, state: .applied, transitionDate: now)
         updateUndoAvailability()
     }
+
+    // MARK: - 统一撤销、重做和布局交换
 
     func undoLastAction() {
         let layout = undoStack.last
@@ -857,6 +869,8 @@ final class FolderCanvasModel: ObservableObject {
         })
         return remapped
     }
+
+    // MARK: - Finder 风格命令与真实文件事务
 
     func open(_ item: FolderItem) { open([item]) }
 
@@ -1187,6 +1201,8 @@ final class FolderCanvasModel: ObservableObject {
             )
         }
     }
+
+    // MARK: - 后台文件操作协调
 
     private func startCoordinatedTransfers(
         recordID: UUID,
@@ -1773,6 +1789,8 @@ final class FolderCanvasModel: ObservableObject {
         try fileOperationEngine.moveToTrash(url)
     }
 
+    // MARK: - 布局与操作历史持久化
+
     private func loadSavedCanvas() {
         savedCanvas = SavedCanvas(rootResourceID: rootResourceID)
         positions = [:]
@@ -2033,6 +2051,8 @@ final class FolderCanvasModel: ObservableObject {
         return true
     }
 
+    // MARK: - 会话写入权和布局修复
+
     /// 尝试取得画布独占写入权。失败时仍允许浏览和打开文件，但所有写操作都被模型层阻止。
     private func acquireSessionLock() {
         guard sessionLockingEnabled, let canvasKey else { return }
@@ -2090,6 +2110,8 @@ final class FolderCanvasModel: ObservableObject {
         if inboxIDs.remove(oldID) != nil { inboxIDs.insert(newID) }
         if selectedIDs.remove(oldID) != nil { selectedIDs.insert(newID) }
     }
+
+    // MARK: - 自动放置、容量与坐标算法
 
     private func arrangeInitialItems(_ freshItems: [FolderItem]) {
         positions = [:]
@@ -2239,6 +2261,8 @@ final class FolderCanvasModel: ObservableObject {
         return "\(volumeID)|\(String(describing: fileID))"
     }
 
+    // MARK: - 书签恢复、最近空间与文件夹监听
+
     private func makeBookmark(for folder: URL) -> Data? {
         try? folder.bookmarkData(
             options: [],
@@ -2361,6 +2385,8 @@ final class FolderCanvasModel: ObservableObject {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
+
+    // MARK: - 文件名冲突和 Office 模板
 
     private func uniqueDestination(for source: URL, in folder: URL) -> URL {
         uniqueDestination(for: source, in: folder, excluding: [])
