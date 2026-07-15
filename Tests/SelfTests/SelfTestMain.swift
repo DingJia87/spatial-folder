@@ -54,6 +54,7 @@ struct SpatialFolderSelfTests {
         run("普通窗口按宽度保持画布比例") { try testWindowAspectTracksWidth() }
         run("普通窗口按高度保持画布比例") { try testWindowAspectTracksHeight() }
         run("窗口比例受当前显示器范围限制") { try testWindowAspectFitsCurrentDisplay() }
+        run("最大化窗口使用完整可见区域") { try testMaximumWindowBypassesAspectConstraint() }
         run("基准画布重设与撤销") { try testReferenceCanvasResetAndUndo() }
         run("小屏重启保持原基准画布") { try testRestartOnSmallerDisplayKeepsReferenceCanvas() }
         run("v4 压缩布局迁移到大屏基准") { try testVersionFourReferenceMigration() }
@@ -789,6 +790,31 @@ struct SpatialFolderSelfTests {
         try check(size.height <= 850.01, "窗口高度超出显示器")
         let canvasRatio = size.width / (size.height - 56)
         try check(abs(canvasRatio - (1920.0 / 1080.0)) < 0.0001, "限制尺寸后画布比例改变")
+    }
+
+    private static func testMaximumWindowBypassesAspectConstraint() throws {
+        let visibleFrame = CGSize(width: 1920, height: 1080)
+        try check(
+            WindowAspectSizing.isMaximumFrameProposal(
+                proposedFrameSize: visibleFrame,
+                visibleFrameSize: visibleFrame
+            ),
+            "完整可见区域没有被识别为最大化"
+        )
+        try check(
+            WindowAspectSizing.isMaximumFrameProposal(
+                proposedFrameSize: CGSize(width: 1919, height: 1079),
+                visibleFrameSize: visibleFrame
+            ),
+            "系统舍入后的最大化尺寸没有被识别"
+        )
+        try check(
+            !WindowAspectSizing.isMaximumFrameProposal(
+                proposedFrameSize: CGSize(width: 1720, height: 1080),
+                visibleFrameSize: visibleFrame
+            ),
+            "仅达到最大高度的普通窗口被误判为最大化"
+        )
     }
 
     private static func testReferenceCanvasResetAndUndo() throws {

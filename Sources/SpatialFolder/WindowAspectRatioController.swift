@@ -2,6 +2,15 @@ import AppKit
 import SwiftUI
 
 enum WindowAspectSizing {
+    static func isMaximumFrameProposal(
+        proposedFrameSize: CGSize,
+        visibleFrameSize: CGSize,
+        tolerance: CGFloat = 2
+    ) -> Bool {
+        proposedFrameSize.width >= visibleFrameSize.width - tolerance &&
+            proposedFrameSize.height >= visibleFrameSize.height - tolerance
+    }
+
     static func constrainedContentSize(
         proposedSize: CGSize,
         currentSize: CGSize,
@@ -196,6 +205,8 @@ struct WindowAspectRatioController: NSViewRepresentable {
         private func adjustCurrentWindowIfNeeded() {
             guard let window,
                   !window.styleMask.contains(.fullScreen),
+                  !window.isZoomed,
+                  !isUsingMaximumFrame(window),
                   proxy?.bypassConstraints != true else { return }
             installProxyIfNeeded()
 
@@ -233,6 +244,14 @@ struct WindowAspectRatioController: NSViewRepresentable {
             return window.contentRect(
                 forFrameRect: NSRect(origin: .zero, size: visibleSize)
             ).size
+        }
+
+        private func isUsingMaximumFrame(_ window: NSWindow) -> Bool {
+            guard let visibleFrameSize = window.screen?.visibleFrame.size else { return false }
+            return WindowAspectSizing.isMaximumFrameProposal(
+                proposedFrameSize: window.frame.size,
+                visibleFrameSize: visibleFrameSize
+            )
         }
 
         private func constrainedFrame(_ frame: NSRect, to visibleFrame: NSRect?) -> NSRect {
@@ -274,6 +293,13 @@ private final class WindowResizeDelegateProxy: NSObject, NSWindowDelegate {
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         let proposedFrameSize = originalDelegate?.windowWillResize?(sender, to: frameSize) ?? frameSize
         guard !bypassConstraints, !sender.styleMask.contains(.fullScreen) else {
+            return proposedFrameSize
+        }
+        if let visibleFrameSize = sender.screen?.visibleFrame.size,
+           WindowAspectSizing.isMaximumFrameProposal(
+               proposedFrameSize: proposedFrameSize,
+               visibleFrameSize: visibleFrameSize
+           ) {
             return proposedFrameSize
         }
 
