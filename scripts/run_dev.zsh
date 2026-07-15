@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
+SDK="$(xcrun --sdk macosx --show-sdk-path)"
 CACHE="$ROOT/.build/module-cache"
-SCRATCH="$ROOT/.build/2.3.2"
+SCRATCH="$ROOT/.build/2.4"
 
 mkdir -p "$CACHE"
 cd "$ROOT"
