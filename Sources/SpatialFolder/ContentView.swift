@@ -1,7 +1,10 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var model: FolderCanvasModel
+    @State private var resetConfirmationPresented = false
+    @State private var referenceCanvasConfirmationPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -11,6 +14,27 @@ struct ContentView: View {
                 if model.folderURL == nil {
                     ContentUnavailableView("选择一个文件夹", systemImage: "square.grid.2x2",
                                            description: Text("把它变成一张可长期记忆的空间画布。"))
+                } else if model.layoutIsBlocked {
+                    ContentUnavailableView {
+                        Label("布局需要恢复", systemImage: "externaldrive.badge.exclamationmark")
+                    } description: {
+                        Text("原布局文件已保留。请恢复备份、导入布局，或确认重置当前空间。")
+                    } actions: {
+                        HStack {
+                            Button("恢复最近备份", action: model.restoreLatestBackup)
+                                .disabled(model.backupCount == 0)
+                            Button("导入布局…", action: model.importLayout)
+                            Button("重置布局", role: .destructive) { resetConfirmationPresented = true }
+                        }
+                    }
+                } else if model.folderUnavailable {
+                    ContentUnavailableView {
+                        Label("原文件夹暂不可用", systemImage: "folder.badge.questionmark")
+                    } description: {
+                        Text("它可能被移动、改名，或者所在磁盘暂时断开。布局数据仍然保留。")
+                    } actions: {
+                        Button("重新关联文件夹…", action: model.chooseReplacementFolder)
+                    }
                 } else {
                     FolderCanvasView()
                 }
@@ -19,16 +43,89 @@ struct ContentView: View {
         .alert("空间文件夹", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("好", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
+        .sheet(item: $model.infoItem) { item in
+            FileInfoView(item: item)
+        }
+        .alert("重置当前布局？", isPresented: $resetConfirmationPresented) {
+            Button("取消", role: .cancel) {}
+            Button("重置", role: .destructive, action: model.resetLayout)
+        } message: {
+            Text("文件不会被移动或删除，但当前图标位置、大小和待放置状态会重新生成。重置前会保留一份布局备份。")
+        }
+        .alert("将当前显示器设为基准画布？", isPresented: $referenceCanvasConfirmationPresented) {
+            Button("取消", role: .cancel) {}
+            Button("设为基准") { model.setCurrentDisplayAsReferenceCanvas() }
+        } message: {
+            Text("仅当旧版布局已经被小屏幕压缩时使用。文件不会移动，图标坐标会按当前显示器重新映射；操作可撤销并会自动备份。")
+        }
     }
 
     private var toolbar: some View {
         HStack(spacing: 12) {
             Button(action: model.chooseFolder) { Label("选择文件夹", systemImage: "folder") }
             if let folder = model.folderURL {
-                Text(folder.lastPathComponent).font(.headline)
+                Text(folder.lastPathComponent)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 150, alignment: .leading)
+                Menu {
+                    ForEach(model.recentFolders, id: \.path) { recent in
+                        Button(recent.lastPathComponent) { model.open(folder: recent) }
+                            .help(recent.path)
+                    }
+                } label: { Label("最近空间", systemImage: "clock.arrow.circlepath") }
+                .disabled(model.recentFolders.isEmpty)
                 Spacer()
+                TextField("筛选当前空间", text: $model.searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
                 Button(action: model.createFolder) { Label("新建文件夹", systemImage: "folder.badge.plus") }
-                Button(action: model.chooseWallpaper) { Label("壁纸", systemImage: "photo") }
+                Menu {
+                    Button("选择图片…", action: model.chooseWallpaper)
+                    Button("使用系统桌面壁纸") { model.setWallpaper(nil) }
+                } label: { Label("壁纸", systemImage: "photo") }
+                Menu {
+                    Button(model.isLocked ? "解锁画布" : "锁定画布", action: model.toggleLocked)
+                    Divider()
+                    Button("撤销布局修改", action: model.undoLayoutChange)
+                        .disabled(!model.canUndo)
+                    Button("重做布局修改", action: model.redoLayoutChange)
+                        .disabled(!model.canRedo)
+                    Button("找回越界项目", action: model.recoverOutOfBoundsItems)
+                        .disabled(model.isLocked)
+                    Button("将当前显示器设为基准画布…") {
+                        referenceCanvasConfirmationPresented = true
+                    }
+                    .disabled(model.isLocked)
+                    Divider()
+                    Button("恢复最近备份", action: model.restoreLatestBackup)
+                        .disabled(model.backupCount == 0)
+                    Button("查看布局备份（\(model.backupCount)）", action: model.revealBackups)
+                    Button("导出布局…", action: model.exportLayout)
+                    Button("导入布局…", action: model.importLayout)
+                    Divider()
+                    Button("重置当前布局", role: .destructive) { resetConfirmationPresented = true }
+                } label: {
+                    Label(model.isLocked ? "已锁定" : "布局", systemImage: model.isLocked ? "lock.fill" : "square.grid.3x3")
+                }
+                if !model.inboxItems.isEmpty {
+                    Menu {
+                        Text("先把主画布项目移入待放置区，可腾出位置。")
+                        Divider()
+                        ForEach(model.inboxItems) { item in
+                            Button(item.name) { model.placeFromInbox(item) }
+                                .disabled(model.isLocked)
+                        }
+                    } label: {
+                        Label("待放置 \(model.inboxItems.count)", systemImage: "tray.full")
+                    }
+                }
+                Menu {
+                    Button("跟随系统") { model.setAppearanceMode("system") }
+                    Button("浅色") { model.setAppearanceMode("light") }
+                    Button("深色") { model.setAppearanceMode("dark") }
+                } label: { Label("外观", systemImage: "circle.lefthalf.filled") }
                 Button(action: model.refreshItems) { Image(systemName: "arrow.clockwise") }
                     .help("刷新")
             } else { Spacer() }
@@ -43,6 +140,11 @@ private struct FolderCanvasView: View {
 
     var body: some View {
         GeometryReader { geometry in
+            let displayScale = CanvasViewport.displayScale(
+                logicalSize: model.desktopCanvasSize,
+                viewportWidth: geometry.size.width,
+                displaySize: model.currentDisplaySize
+            )
             ScrollView(.vertical) {
                 ZStack(alignment: .topLeading) {
                     CanvasBackground(url: model.wallpaperURL ?? model.defaultDesktopWallpaperURL)
@@ -50,7 +152,7 @@ private struct FolderCanvasView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { model.clearSelection() }
                         .gesture(selectionGesture)
-                    ForEach(model.items) { item in
+                    ForEach(model.displayedItems) { item in
                         CanvasIcon(item: item)
                     }
                     if let selection = model.selectionRect {
@@ -64,6 +166,11 @@ private struct FolderCanvasView: View {
                 }
                 .frame(width: model.desktopCanvasSize.width,
                        height: model.desktopCanvasSize.height)
+                .scaleEffect(displayScale, anchor: .topLeading)
+                .frame(width: model.desktopCanvasSize.width * displayScale,
+                       height: model.desktopCanvasSize.height * displayScale,
+                       alignment: .topLeading)
+                .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: receiveDroppedFiles)
                 .contextMenu {
                     Menu("新建") {
                         Button("文件夹", action: model.createFolder)
@@ -73,7 +180,36 @@ private struct FolderCanvasView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .overlay(alignment: .topTrailing) {
+            if model.isLocked {
+                Label("布局已锁定", systemImage: "lock.fill")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(12)
+            }
+        }
+        .onAppear(perform: updateCurrentScreenSize)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)) { notification in
+            guard let window = notification.object as? NSWindow, window == NSApp.keyWindow else { return }
+            updateCurrentScreenSize()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            updateCurrentScreenSize()
+        }
+    }
+
+    private func receiveDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                let url = (item as? URL) ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                if let url { DispatchQueue.main.async { model.importFiles([url]) } }
+            }
+        }
+        return true
     }
 
     private var selectionGesture: some Gesture {
@@ -85,6 +221,11 @@ private struct FolderCanvasView: View {
             .onEnded { _ in
                 model.finishSelection(addingToSelection: NSEvent.modifierFlags.contains(.command))
             }
+    }
+
+    private func updateCurrentScreenSize() {
+        guard let size = NSApp.keyWindow?.screen?.frame.size else { return }
+        model.updateCanvasSize(size)
     }
 }
 
@@ -106,7 +247,6 @@ private struct CanvasBackground: View {
 private struct CanvasIcon: View {
     @EnvironmentObject private var model: FolderCanvasModel
     let item: FolderItem
-    @State private var dragOffset: CGSize = .zero
     @State private var isDragging = false
     @State private var renamePresented = false
     @State private var renameText = ""
@@ -126,6 +266,16 @@ private struct CanvasIcon: View {
                 .frame(width: 94 * scale)
                 .foregroundStyle(.white)
                 .shadow(radius: 2)
+            if !item.tags.isEmpty {
+                HStack(spacing: 3) {
+                    ForEach(item.tags, id: \.self) { tag in
+                        Circle()
+                            .fill(tagColor(tag))
+                            .frame(width: 7 * scale, height: 7 * scale)
+                            .help(model.normalizedTagName(tag))
+                    }
+                }
+            }
         }
         .frame(width: 104 * scale, height: 96 * scale)
         .background(isSelected ? Color.accentColor.opacity(0.32) : .clear, in: RoundedRectangle(cornerRadius: 8))
@@ -147,9 +297,33 @@ private struct CanvasIcon: View {
                 model.finishDrag()
                 isDragging = false
             })
+        .onDrag { NSItemProvider(object: item.url as NSURL) }
         .contextMenu {
             Button("打开") { model.open(item) }
             Button("在访达中显示") { model.reveal(item) }
+            Divider()
+            Button("复制") { model.copy([item]) }
+            Button("剪切") { model.cut([item]) }
+            Button("制作副本") { model.duplicate(item) }
+            Button("压缩") { model.compress(item) }
+            Button("分享…") { model.share(item) }
+            Divider()
+            Menu("标签") {
+                ForEach(FinderTag.allCases) { tag in
+                    Button {
+                        model.toggleTag(tag.encodedValue, for: item)
+                    } label: {
+                        if model.hasTag(tag.encodedValue, in: item) {
+                            Label(tag.title, systemImage: "checkmark")
+                        } else {
+                            Text(tag.title)
+                        }
+                    }
+                }
+                Divider()
+                Button("清除所有标签") { model.clearTags(for: item) }
+                    .disabled(item.tags.isEmpty)
+            }
             Divider()
             Menu("图标与字体大小") {
                 scaleButton("小", scale: 0.75, currentScale: scale)
@@ -157,7 +331,11 @@ private struct CanvasIcon: View {
                 scaleButton("大", scale: 1.25, currentScale: scale)
                 scaleButton("特大", scale: 1.5, currentScale: scale)
             }
+            .disabled(model.isLocked)
+            Button("移到待放置区") { model.moveToInbox(item) }
+                .disabled(model.isLocked)
             Divider()
+            Button("显示简介") { model.showInfo(item) }
             Button("重命名…") { renameText = item.name; renamePresented = true }
             Button("移至废纸篓", role: .destructive) { model.trash(item) }
         }
@@ -179,5 +357,80 @@ private struct CanvasIcon: View {
                 Text(title)
             }
         }
+    }
+
+    private func tagColor(_ tag: String) -> Color {
+        switch model.normalizedTagName(tag).lowercased() {
+        case "红色", "red": return Color.red
+        case "橙色", "orange": return Color.orange
+        case "黄色", "yellow": return Color.yellow
+        case "绿色", "green": return Color.green
+        case "蓝色", "blue": return Color.blue
+        case "紫色", "purple": return Color.purple
+        default: return Color.gray
+        }
+    }
+}
+
+private enum FinderTag: CaseIterable, Identifiable {
+    case red, orange, yellow, green, blue, purple, gray
+
+    var id: String { encodedValue }
+    var title: String {
+        switch self {
+        case .red: "红色"
+        case .orange: "橙色"
+        case .yellow: "黄色"
+        case .green: "绿色"
+        case .blue: "蓝色"
+        case .purple: "紫色"
+        case .gray: "灰色"
+        }
+    }
+    var encodedValue: String {
+        switch self {
+        case .red: "红色\n6"
+        case .orange: "橙色\n7"
+        case .yellow: "黄色\n5"
+        case .green: "绿色\n2"
+        case .blue: "蓝色\n4"
+        case .purple: "紫色\n3"
+        case .gray: "灰色\n1"
+        }
+    }
+}
+
+private struct FileInfoView: View {
+    let item: FolderItem
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: item.url.path)) ?? [:]
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let modified = attributes[.modificationDate] as? Date
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(nsImage: item.icon).resizable().frame(width: 48, height: 48)
+                VStack(alignment: .leading) {
+                    Text(item.name).font(.headline)
+                    Text(item.url.pathExtension.isEmpty ? "文件夹" : item.url.pathExtension.uppercased())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
+                GridRow { Text("位置").foregroundStyle(.secondary); Text(item.url.deletingLastPathComponent().path).textSelection(.enabled) }
+                GridRow { Text("大小").foregroundStyle(.secondary); Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) }
+                if let modified {
+                    GridRow { Text("修改日期").foregroundStyle(.secondary); Text(modified.formatted(date: .long, time: .shortened)) }
+                }
+                GridRow { Text("标签").foregroundStyle(.secondary); Text(item.tags.isEmpty ? "无" : item.tags.map { $0.components(separatedBy: "\n").first ?? $0 }.joined(separator: "、")) }
+            }
+            HStack {
+                Spacer()
+                Button("好") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
     }
 }
