@@ -3,12 +3,12 @@ set -euo pipefail
 
 ROOT="${0:A:h:h}"
 RELEASE_DIR="$ROOT/Release"
-APP_NAME="空间文件夹 2.2 测试版"
+APP_NAME="空间文件夹 2.3 测试版"
 APP="$RELEASE_DIR/$APP_NAME.app"
-ZIP="$RELEASE_DIR/空间文件夹-v2.2-测试版.zip"
+ZIP="$RELEASE_DIR/空间文件夹-v2.3-测试版.zip"
 SDK="/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk"
 CACHE="$ROOT/.build/module-cache"
-SCRATCH="$ROOT/.build/2.2-release"
+SCRATCH="$ROOT/.build/2.3-release"
 
 if [[ ! -d "$SDK" ]]; then
     SDK="$(xcrun --sdk macosx --show-sdk-path)"
@@ -35,7 +35,7 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
-VERIFY_DIR="$(mktemp -d /tmp/spatial-folder-2.2-verify.XXXXXX)"
+VERIFY_DIR="$(mktemp -d /tmp/spatial-folder-2.3-verify.XXXXXX)"
 trap 'rm -rf "$VERIFY_DIR"' EXIT
 ditto -x -k "$ZIP" "$VERIFY_DIR"
 codesign --verify --deep --strict --verbose=2 "$VERIFY_DIR/$APP_NAME.app"

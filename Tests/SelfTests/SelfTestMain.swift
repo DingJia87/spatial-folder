@@ -51,6 +51,9 @@ struct SpatialFolderSelfTests {
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
         run("跨屏往返不改写布局") { try testScreenSwitchDoesNotMutateLayout() }
         run("小屏视口统一缩放") { try testViewportScaleIsUniform() }
+        run("普通窗口按宽度保持画布比例") { try testWindowAspectTracksWidth() }
+        run("普通窗口按高度保持画布比例") { try testWindowAspectTracksHeight() }
+        run("窗口比例受当前显示器范围限制") { try testWindowAspectFitsCurrentDisplay() }
         run("基准画布重设与撤销") { try testReferenceCanvasResetAndUndo() }
         run("小屏重启保持原基准画布") { try testRestartOnSmallerDisplayKeepsReferenceCanvas() }
         run("v4 压缩布局迁移到大屏基准") { try testVersionFourReferenceMigration() }
@@ -749,6 +752,43 @@ struct SpatialFolderSelfTests {
         let iconWidth = 104.0 * scale
         let spacing = 320.0 * scale
         try check(abs(iconWidth / spacing - 104.0 / 320.0) < 0.000_001, "图标和间距比例不一致")
+    }
+
+    private static func testWindowAspectTracksWidth() throws {
+        let size = WindowAspectSizing.constrainedContentSize(
+            proposedSize: CGSize(width: 1280, height: 700),
+            currentSize: CGSize(width: 1000, height: 700),
+            canvasSize: CGSize(width: 1920, height: 1080),
+            fixedChromeHeight: 56
+        )
+        try check(abs(size.width - 1280) < 0.01, "窗口宽度没有跟随拖动")
+        try check(abs(size.height - 776) < 0.01, "没有在画布比例之外保留固定工具栏高度")
+    }
+
+    private static func testWindowAspectTracksHeight() throws {
+        let size = WindowAspectSizing.constrainedContentSize(
+            proposedSize: CGSize(width: 1000, height: 900),
+            currentSize: CGSize(width: 1000, height: 700),
+            canvasSize: CGSize(width: 1920, height: 1080),
+            fixedChromeHeight: 56
+        )
+        try check(abs(size.width - 1500.4444) < 0.01, "窗口宽度没有跟随高度变化")
+        try check(abs(size.height - 900) < 0.01, "窗口高度没有跟随拖动")
+    }
+
+    private static func testWindowAspectFitsCurrentDisplay() throws {
+        let size = WindowAspectSizing.constrainedContentSize(
+            proposedSize: CGSize(width: 2400, height: 1400),
+            currentSize: CGSize(width: 1200, height: 731),
+            canvasSize: CGSize(width: 1920, height: 1080),
+            fixedChromeHeight: 56,
+            minimumSize: CGSize(width: 900, height: 620),
+            maximumSize: CGSize(width: 1440, height: 850)
+        )
+        try check(size.width <= 1440.01, "窗口宽度超出显示器")
+        try check(size.height <= 850.01, "窗口高度超出显示器")
+        let canvasRatio = size.width / (size.height - 56)
+        try check(abs(canvasRatio - (1920.0 / 1080.0)) < 0.0001, "限制尺寸后画布比例改变")
     }
 
     private static func testReferenceCanvasResetAndUndo() throws {

@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var resetConfirmationPresented = false
     @State private var referenceCanvasConfirmationPresented = false
     @State private var historyPresented = false
+    @State private var toolbarHeight: CGFloat = 52
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,6 +76,15 @@ struct ContentView: View {
             Button("设为基准") { model.setCurrentDisplayAsReferenceCanvas() }
         } message: {
             Text("仅当旧版布局已经被小屏幕压缩时使用。文件不会移动，图标坐标会按当前显示器重新映射；操作可撤销并会自动备份。")
+        }
+        .background {
+            WindowAspectRatioController(
+                canvasSize: model.desktopCanvasSize,
+                fixedChromeHeight: toolbarHeight + 1
+            )
+        }
+        .onPreferenceChange(ToolbarHeightPreferenceKey.self) { height in
+            if height > 0 { toolbarHeight = height }
         }
     }
 
@@ -154,6 +164,21 @@ struct ContentView: View {
         }
         .padding(12)
         .background(.bar)
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(
+                    key: ToolbarHeightPreferenceKey.self,
+                    value: geometry.size.height
+                )
+            }
+        }
+    }
+}
+
+private struct ToolbarHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 52
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
