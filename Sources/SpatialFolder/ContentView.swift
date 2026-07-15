@@ -278,7 +278,13 @@ private struct FolderCanvasView: View {
             )
             ScrollView(.vertical) {
                 ZStack(alignment: .topLeading) {
-                    CanvasBackground(url: model.wallpaperURL ?? model.defaultDesktopWallpaperURL)
+                    CanvasBackground(
+                        url: model.wallpaperURL ?? model.defaultDesktopWallpaperURL,
+                        requestedPixelSize: max(
+                            presentationSize.width * displayScale,
+                            presentationSize.height * displayScale
+                        ) * 2
+                    )
                         .frame(width: presentationSize.width, height: presentationSize.height)
                         .contentShape(Rectangle())
                         .onTapGesture { model.clearSelection() }
@@ -362,9 +368,12 @@ private struct FolderCanvasView: View {
 
 private struct CanvasBackground: View {
     let url: URL?
+    let requestedPixelSize: CGFloat
+    @State private var image: NSImage?
+
     var body: some View {
         Group {
-            if let url, let image = NSImage(contentsOf: url) {
+            if let image {
                 Image(nsImage: image).resizable().scaledToFill()
             } else {
                 LinearGradient(colors: [Color(red: 0.08, green: 0.14, blue: 0.23), Color(red: 0.12, green: 0.28, blue: 0.32)], startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -372,6 +381,19 @@ private struct CanvasBackground: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
+        .task(id: request) {
+            guard let request else {
+                image = nil
+                return
+            }
+            let decoded = await WallpaperImageLoader.shared.image(for: request)
+            guard !Task.isCancelled else { return }
+            image = decoded.map { NSImage(cgImage: $0, size: .zero) }
+        }
+    }
+
+    private var request: WallpaperImageRequest? {
+        url.map { WallpaperImageRequest(url: $0, requestedPixelSize: requestedPixelSize) }
     }
 }
 
@@ -388,7 +410,7 @@ private struct CanvasIcon: View {
         let isSelected = model.selectedIDs.contains(item.id)
         let sharedOffset = model.draggingIDs.contains(item.id) ? model.dragTranslation : .zero
         VStack(spacing: 5) {
-            Image(nsImage: item.icon).resizable().interpolation(.high)
+            Image(nsImage: model.icon(for: item)).resizable().interpolation(.high)
                 .frame(width: 56 * scale, height: 56 * scale)
             Text(item.name)
                 .font(.system(size: max(10, 12 * scale)))
@@ -533,6 +555,7 @@ private enum FinderTag: CaseIterable, Identifiable {
 
 private struct FileInfoView: View {
     let item: FolderItem
+    @EnvironmentObject private var model: FolderCanvasModel
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -541,7 +564,7 @@ private struct FileInfoView: View {
         let modified = attributes[.modificationDate] as? Date
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
-                Image(nsImage: item.icon).resizable().frame(width: 48, height: 48)
+                Image(nsImage: model.icon(for: item)).resizable().frame(width: 48, height: 48)
                 VStack(alignment: .leading) {
                     Text(item.name).font(.headline)
                     Text(item.url.pathExtension.isEmpty ? "文件夹" : item.url.pathExtension.uppercased())

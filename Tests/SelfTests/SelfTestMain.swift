@@ -34,6 +34,7 @@ struct SpatialFolderSelfTests {
         run("画布跨进程锁独占与释放") { try testCanvasSessionLockExclusivity() }
         run("第二个画布模型进入只读模式") { try testSecondModelUsesReadOnlySession() }
         run("2.3.2 偏好迁移到稳定版本") { try testPreferencesMigration() }
+        run("3000 项目录扫描保持可接受耗时") { try testLargeFolderScanPerformance() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
         run("App 重命名恢复路径与画布位置") { try testModelRenameUndoRedo() }
         run("App 制作副本统一撤销重做") { try testModelDuplicateUndoRedo() }
@@ -529,6 +530,25 @@ struct SpatialFolderSelfTests {
         try check(destination.string(forKey: "lastOpenedFolderPath") == "/tmp/latest", "重复迁移改变了已完成结果")
     }
 
+    private static func testLargeFolderScanPerformance() throws {
+        let base = temporaryDirectory(prefix: "LargeScan")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let payload = Data("scan".utf8)
+        for index in 0..<3_000 {
+            try payload.write(to: base.appendingPathComponent(String(format: "item-%05d.txt", index)))
+        }
+        let hidden = base.appendingPathComponent(".hidden.txt")
+        try payload.write(to: hidden)
+
+        let start = ContinuousClock.now
+        let entries = try FolderDirectoryScanner().scan(folder: base)
+        let elapsed = start.duration(to: .now)
+        try check(entries.count == 3_000, "目录扫描数量不正确或错误包含隐藏文件")
+        try check(entries.first?.url.lastPathComponent == "item-00000.txt", "扫描结果没有稳定排序")
+        try check(elapsed < .seconds(10), "3000 项目录扫描耗时过长：\(elapsed)")
+    }
+
     private static func testModelCreateFolderUndoRedo() throws {
         let fixture = try makeFixture(itemCount: 0)
         defer { fixture.cleanup() }
@@ -625,7 +645,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.canUndo, "重启后文件操作不能撤销")
@@ -648,7 +669,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: true,
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         try check(reopened.folderURL == movedFolder.standardizedFileURL, "根文件夹移动后没有自动恢复")
         reopened.undoLastAction()
@@ -750,7 +772,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.operationRecords.first?.state == .unavailable, "未完成操作没有标记为需核对")
@@ -777,7 +800,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.operationHistoryIsBlocked, "App 没有识别损坏操作记录")
@@ -858,7 +882,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: false,
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.isLocked, "重新打开文件夹后锁定状态丢失")
@@ -1028,7 +1053,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: false,
             initialCanvasSize: internalDisplay,
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         reopened.open(folder: fixture.folder)
         let reopenedItem = try require(reopened.items.first, "重启后项目缺失")
@@ -1060,7 +1086,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: false,
             initialCanvasSize: external,
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         migrated.open(folder: fixture.folder)
         let migratedItem = try require(migrated.items.first, "迁移后项目缺失")
@@ -1104,7 +1131,8 @@ struct SpatialFolderSelfTests {
             autoOpenLastFolder: true,
             initialCanvasSize: CGSize(width: 1024, height: 768),
             monitorFolders: false,
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         defer { fixture.cleanup() }
         try check(reopened.folderURL?.standardizedFileURL == movedFolder.standardizedFileURL, "移动后没有恢复新路径")
@@ -1172,7 +1200,8 @@ struct SpatialFolderSelfTests {
             initialCanvasSize: canvasSize,
             monitorFolders: false,
             sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
-            sessionLockingEnabled: false
+            sessionLockingEnabled: false,
+            scansAsynchronously: false
         )
         model.open(folder: folder)
         return ModelFixture(

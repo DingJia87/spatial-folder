@@ -5,7 +5,6 @@ import SwiftUI
 
 struct FolderItem: Identifiable, Hashable {
     let url: URL
-    let icon: NSImage
     let tags: [String]
     let resourceID: String?
 
@@ -52,6 +51,10 @@ final class FolderCanvasModel: ObservableObject {
     private let monitorFolders: Bool
     private let sessionLockDirectory: URL
     private let sessionLockingEnabled: Bool
+    private let directoryScanner: FolderDirectoryScanner
+    private let scanService: FolderScanService
+    private let scansAsynchronously: Bool
+    private let iconCache = FileIconCache()
 
     @Published private(set) var folderURL: URL?
     @Published private(set) var items: [FolderItem] = []
@@ -72,6 +75,7 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var operationHistoryIsBlocked = false
     @Published private(set) var sessionIsReadOnly = false
     @Published private(set) var sessionLockOwner: CanvasSessionOwner?
+    @Published private(set) var isRefreshing = false
     @Published var pendingConflict: PendingFileConflict?
     @Published private(set) var backupCount = 0
     @Published private(set) var canvasSize: CGSize
@@ -84,7 +88,8 @@ final class FolderCanvasModel: ObservableObject {
 
     private var folderMonitor: DispatchSourceFileSystemObject?
     private var refreshWorkItem: DispatchWorkItem?
-    private var iconCache: [String: NSImage] = [:]
+    private var scanTask: Task<Void, Never>?
+    private var scanGeneration = UUID()
     private var savedCanvas = SavedCanvas()
     private var needsInitialArrangement = false
     private var needsGridMigration = false
@@ -108,7 +113,9 @@ final class FolderCanvasModel: ObservableObject {
         initialCanvasSize: CGSize? = nil,
         monitorFolders: Bool = true,
         sessionLockDirectory: URL = CanvasSessionLock.defaultLockDirectory(),
-        sessionLockingEnabled: Bool = true
+        sessionLockingEnabled: Bool = true,
+        directoryScanner: FolderDirectoryScanner = FolderDirectoryScanner(),
+        scansAsynchronously: Bool = true
     ) {
         self.layoutStore = layoutStore
         self.operationStore = operationStore
@@ -117,6 +124,9 @@ final class FolderCanvasModel: ObservableObject {
         self.monitorFolders = monitorFolders
         self.sessionLockDirectory = sessionLockDirectory
         self.sessionLockingEnabled = sessionLockingEnabled
+        self.directoryScanner = directoryScanner
+        scanService = FolderScanService(scanner: directoryScanner)
+        self.scansAsynchronously = scansAsynchronously
         let startingSize = initialCanvasSize ?? NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
         canvasSize = startingSize
         currentDisplaySize = startingSize
@@ -157,6 +167,10 @@ final class FolderCanvasModel: ObservableObject {
         folderURL != nil && !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly && !isLocked
     }
 
+    func icon(for item: FolderItem) -> NSImage {
+        iconCache.icon(for: item.url)
+    }
+
     var defaultDesktopWallpaperURL: URL? {
         guard let screen = NSApp.keyWindow?.screen ?? NSScreen.main else { return nil }
         return NSWorkspace.shared.desktopImageURL(for: screen)
@@ -194,6 +208,9 @@ final class FolderCanvasModel: ObservableObject {
         }
         folderMonitor?.cancel()
         refreshWorkItem?.cancel()
+        scanTask?.cancel()
+        scanGeneration = UUID()
+        iconCache.removeAll()
         sessionLock?.release()
         sessionLock = nil
         sessionIsReadOnly = false
@@ -225,48 +242,86 @@ final class FolderCanvasModel: ObservableObject {
             return
         }
         folderUnavailable = false
-        do {
-            let keys: Set<URLResourceKey> = [
-                .isHiddenKey, .tagNamesKey, .fileResourceIdentifierKey, .volumeIdentifierKey
-            ]
-            let urls = try FileManager.default.contentsOfDirectory(
-                at: folderURL,
-                includingPropertiesForKeys: Array(keys),
-                options: [.skipsHiddenFiles]
-            )
-            let freshItems = urls.compactMap { url -> FolderItem? in
-                let values = try? url.resourceValues(forKeys: keys)
-                guard values?.isHidden != true else { return nil }
-                return FolderItem(
-                    url: url,
-                    icon: cachedIcon(for: url),
-                    tags: values?.tagNames ?? [],
-                    resourceID: persistentResourceIdentifier(values: values)
-                )
-            }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            let currentPaths = Set(freshItems.map(\.id))
-            iconCache = iconCache.filter { currentPaths.contains($0.key) }
-            items = freshItems
-            selectedIDs.formIntersection(currentPaths)
-
-            var changed = reconcileResourcePaths(freshItems)
-            guard !layoutIsBlocked else { return }
-            if needsInitialArrangement {
-                arrangeInitialItems(freshItems)
-                needsInitialArrangement = false
-                changed = true
-            } else if needsGridMigration {
-                arrangeInitialItems(freshItems)
-                needsGridMigration = false
-                changed = true
-            } else {
-                changed = assignPositionsToNewItems(freshItems) || changed
+        if scansAsynchronously {
+            refreshItemsInBackground(folder: folderURL)
+        } else {
+            do {
+                applyScan(try directoryScanner.scan(folder: folderURL), for: folderURL)
+            } catch {
+                errorMessage = "无法读取文件夹：\(error.localizedDescription)"
             }
-            changed = enforceCapacityAndBounds(freshItems) || changed
-            if changed { persist(makeBackup: false) }
-        } catch {
-            errorMessage = "无法读取文件夹：\(error.localizedDescription)"
         }
+    }
+
+    /// 生产环境使用后台扫描；generation 防止切换空间后旧结果覆盖新画布。
+    private func refreshItemsInBackground(folder: URL) {
+        scanTask?.cancel()
+        let generation = UUID()
+        scanGeneration = generation
+        isRefreshing = true
+        scanTask = Task { [weak self, scanService] in
+            do {
+                let entries = try await scanService.scan(folder: folder)
+                guard !Task.isCancelled,
+                      let self,
+                      self.scanGeneration == generation,
+                      self.folderURL?.standardizedFileURL == folder.standardizedFileURL else { return }
+                self.applyScan(entries, for: folder)
+                self.isRefreshing = false
+            } catch is CancellationError {
+                if self?.scanGeneration == generation { self?.isRefreshing = false }
+            } catch {
+                guard let self, self.scanGeneration == generation else { return }
+                self.isRefreshing = false
+                self.errorMessage = "无法读取文件夹：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 把扫描快照一次性应用到主线程状态，避免边扫描边发布造成界面反复重排。
+    private func applyScan(_ entries: [ScannedFolderEntry], for folder: URL) {
+        guard folderURL?.standardizedFileURL == folder.standardizedFileURL else { return }
+        let freshItems = entries.map {
+            FolderItem(url: $0.url, tags: $0.tags, resourceID: $0.resourceID)
+        }
+        items = freshItems
+        let currentPaths = Set(freshItems.map(\.id))
+        selectedIDs.formIntersection(currentPaths)
+
+        var changed = reconcileResourcePaths(freshItems)
+        guard !layoutIsBlocked else { return }
+        if needsInitialArrangement {
+            arrangeInitialItems(freshItems)
+            needsInitialArrangement = false
+            changed = true
+        } else if needsGridMigration {
+            arrangeInitialItems(freshItems)
+            needsGridMigration = false
+            changed = true
+        } else {
+            changed = assignPositionsToNewItems(freshItems) || changed
+        }
+        changed = enforceCapacityAndBounds(freshItems) || changed
+        if changed { persist(makeBackup: false) }
+        capturePendingCanvasMetadataAfterRefresh()
+    }
+
+    /// 文件操作先落盘、扫描稍后完成时，在这里补记新项目的画布位置。
+    private func capturePendingCanvasMetadataAfterRefresh() {
+        let kinds: Set<OperationKind> = [.createFolder, .createDocument, .duplicate, .copyItems, .moveItems, .compress]
+        var changed = false
+        for index in operationRecords.indices where
+            operationRecords[index].state == .applied &&
+            operationRecords[index].canvasItems.isEmpty &&
+            kinds.contains(operationRecords[index].kind) {
+            var record = operationRecords[index]
+            captureCanvasMetadata(in: &record)
+            if !record.canvasItems.isEmpty {
+                operationRecords[index] = record
+                changed = true
+            }
+        }
+        if changed { persistOperationHistory() }
     }
 
     func position(for item: FolderItem) -> CanvasPoint {
@@ -1770,13 +1825,6 @@ final class FolderCanvasModel: ObservableObject {
         let workItem = DispatchWorkItem { [weak self] in self?.refreshItems() }
         refreshWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: workItem)
-    }
-
-    private func cachedIcon(for url: URL) -> NSImage {
-        if let icon = iconCache[url.path] { return icon }
-        let icon = NSWorkspace.shared.icon(forFile: url.path)
-        iconCache[url.path] = icon
-        return icon
     }
 
     private func remember(folder: URL) {
