@@ -255,6 +255,73 @@ actor FileOperationCoordinator {
         }
     }
 
+    /// 创建单个真实目录也通过协调器执行，保证短 I/O 不会因为“通常很快”而回到主线程。
+    func createDirectory(
+        at destination: URL,
+        eventHandler: EventHandler
+    ) async throws -> [ReversibleFileAction] {
+        try Task.checkCancellation()
+        try await eventHandler(.willBegin(step: 1, total: 1, detail: "正在新建“\(destination.lastPathComponent)”"))
+        do {
+            try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+            let action = ReversibleFileAction.materialize(MaterializeAction(destinationPath: destination.path))
+            try await eventHandler(.didApply(action: action, completed: 1, total: 1))
+            return [action]
+        } catch {
+            var actions: [ReversibleFileAction] = []
+            if fileManager.fileExists(atPath: destination.path) {
+                let partial = ReversibleFileAction.materialize(MaterializeAction(destinationPath: destination.path))
+                actions.append(partial)
+                try? await eventHandler(.didApply(action: partial, completed: 1, total: 1))
+            }
+            let rollback = rollback(actions: actions)
+            throw CoordinatedFileOperationFailure(
+                message: error.localizedDescription,
+                actions: rollback.actions,
+                displacements: rollback.displacements,
+                rollbackSucceeded: rollback.succeeded,
+                wasCancelled: error is CancellationError
+            )
+        }
+    }
+
+    /// Finder 标签逐项写入并逐项回报，日志失败会触发同批次回滚。
+    func applyTags(
+        _ actions: [TagAction],
+        eventHandler: EventHandler
+    ) async throws -> [ReversibleFileAction] {
+        var completedActions: [ReversibleFileAction] = []
+        do {
+            for (index, value) in actions.enumerated() {
+                try Task.checkCancellation()
+                try await eventHandler(.willBegin(
+                    step: index + 1,
+                    total: actions.count,
+                    detail: "正在更新“\(URL(fileURLWithPath: value.path).lastPathComponent)”的标签"
+                ))
+                try writeFinderTags(value.after, to: URL(fileURLWithPath: value.path))
+                let action = ReversibleFileAction.tags(value)
+                completedActions.append(action)
+                try await eventHandler(.didApply(
+                    action: action,
+                    completed: index + 1,
+                    total: actions.count
+                ))
+            }
+            return completedActions
+        } catch {
+            try? await eventHandler(.rollingBack(detail: "正在恢复本批次原有标签"))
+            let rollback = rollback(actions: completedActions)
+            throw CoordinatedFileOperationFailure(
+                message: error.localizedDescription,
+                actions: rollback.actions,
+                displacements: rollback.displacements,
+                rollbackSucceeded: rollback.succeeded,
+                wasCancelled: error is CancellationError
+            )
+        }
+    }
+
     /// 把可能包含大量项目的撤销/重做放到后台 Actor；调用方会在启动前把记录标成过渡状态，
     /// 因而即使 App 中途退出，下一次启动也不会把未知状态误报为成功。
     func transition(

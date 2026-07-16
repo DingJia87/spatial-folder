@@ -1,4 +1,4 @@
-name: 2.4 质量检查
+name: 2.5 质量检查
 
 on:
   push:
@@ -17,10 +17,12 @@ jobs:
         run: swift --version
 
       - name: 运行标准测试
-        run: swift test -Xswiftc -warnings-as-errors
+        run: ./scripts/run_standard_tests.zsh
 
       - name: 运行完整兼容性回归
         run: ./scripts/run_self_tests.zsh
 
       - name: 严格 Release 构建
-        run: swift build -c release -Xswiftc -warnings-as-errors
+        run: |
+          SDKROOT="$(./scripts/select_macos_sdk.zsh)" swift build -c release \
+            --disable-sandbox -Xswiftc -warnings-as-errors

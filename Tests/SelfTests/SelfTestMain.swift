@@ -23,6 +23,10 @@ struct SpatialFolderSelfTests {
         run("旧版路径布局迁移") { try testLegacyMigration() }
         run("跨文件夹布局导入拒绝") { try testWrongFolderImport() }
         run("操作记录持久化与数量限制") { try testOperationHistoryPersistence() }
+        run("2.4 操作记录迁移到增量日志") { try testOperationJournalLegacyMigration() }
+        run("增量日志重放与自动压缩") { try testOperationJournalReplayAndCompaction() }
+        run("断电日志半行可安全忽略并继续追加") { try testOperationJournalRepairsPartialTail() }
+        await runAsync("1000 次增量日志追加保持线性性能") { try await testOperationJournalPerformance() }
         run("重命名事务撤销与重做") { try testRelocateUndoRedo() }
         run("新建事务撤销后保留内容") { try testMaterializeUndoRedo() }
         run("废纸篓事务撤销与重做") { try testDiscardUndoRedo() }
@@ -38,6 +42,8 @@ struct SpatialFolderSelfTests {
         await runAsync("后台批量复制逐步记录并可撤销") { try await testCoordinatedTransferRoundTrip() }
         await runAsync("后台批量失败自动回滚") { try await testCoordinatedTransferFailureRollsBack() }
         await runAsync("模型生产路径异步导入不阻塞并落账") { try await testModelAsynchronousImport() }
+        await runAsync("短文件操作生产路径全部后台执行") { try await testBackgroundShortFileOperations() }
+        await runAsync("异常恢复分析只依据磁盘证据") { try await testRecoveryAnalyzerEvidence() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
         run("App 重命名恢复路径与画布位置") { try testModelRenameUndoRedo() }
         run("App 制作副本统一撤销重做") { try testModelDuplicateUndoRedo() }
@@ -54,6 +60,7 @@ struct SpatialFolderSelfTests {
         run("70 项目进入 64+6 布局") { try testSeventyItemOverflow() }
         run("待放置区与主画布交换") { try testInboxSwap() }
         run("待放置区批量放回") { try testBatchInboxPlacement() }
+        run("外部拖入按落点排列且不移动已有项目") { try testDropLocationPlacement() }
         run("多选整体拖动保持相对位置") { try testGroupDragPreservesRelativeLayout() }
         run("多选批量副本和废纸篓") { try testBatchDuplicateAndTrash() }
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
@@ -208,6 +215,135 @@ struct SpatialFolderSelfTests {
         try check(loaded.records.count == 20, "操作记录没有限制为 20 条")
         try check(loaded.records.first?.summary == "记录 4", "操作记录没有保留最新项目")
         try check(loaded.records.last?.state == .applied, "操作状态没有持久化")
+    }
+
+    private static func testOperationJournalLegacyMigration() throws {
+        let directory = temporaryDirectory(prefix: "JournalMigration")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let legacy = OperationHistoryStore(directory: directory, maximumRecords: 20)
+        let key = "canvas"
+        let record = OperationRecord(
+            category: .file,
+            kind: .createFolder,
+            summary: "2.4 记录",
+            state: .applied,
+            actions: [.materialize(MaterializeAction(destinationPath: "/tmp/legacy"))]
+        )
+        try legacy.save(OperationHistoryDocument(records: [record]), canvasKey: key)
+
+        let journal = OperationJournalDiskStore(
+            directory: directory,
+            maximumRecords: 20,
+            compactionEventThreshold: 50
+        )
+        let loaded = try journal.load(canvasKey: key)
+        try check(loaded.records.count == 1, "迁移后记录数量发生变化")
+        try check(loaded.records.first?.id == record.id, "迁移后记录标识发生变化")
+        try check(loaded.records.first?.summary == record.summary, "迁移后记录摘要发生变化")
+        try check(loaded.records.first?.actions == record.actions, "迁移后可恢复动作发生变化")
+        try check(FileManager.default.fileExists(atPath: journal.snapshotURL(canvasKey: key).path), "迁移没有生成快照")
+        try check(FileManager.default.fileExists(atPath: journal.archivedLegacyURL(canvasKey: key).path), "2.4 原记录没有归档保留")
+        try check(!FileManager.default.fileExists(atPath: journal.legacyURL(canvasKey: key).path), "迁移后仍重复读取旧记录")
+    }
+
+    private static func testOperationJournalReplayAndCompaction() throws {
+        let directory = temporaryDirectory(prefix: "JournalReplay")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let journal = OperationJournalDiskStore(
+            directory: directory,
+            maximumRecords: 20,
+            compactionEventThreshold: 3,
+            compactionByteThreshold: 1_000_000
+        )
+        let key = "canvas"
+        var record = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "批量复制",
+            state: .pending
+        )
+        let first = try journal.append(.upsert([record]), canvasKey: key)
+        try check(first.appendedEventCount == 1 && !first.didCompact, "第一条事件错误触发压缩")
+        record.actions.append(.materialize(MaterializeAction(destinationPath: "/tmp/a")))
+        _ = try journal.append(.upsert([record]), canvasKey: key)
+        record.state = .applied
+        let compacted = try journal.append(.upsert([record]), canvasKey: key)
+        try check(compacted.didCompact, "达到阈值后没有压缩日志")
+
+        let loaded = try journal.load(canvasKey: key)
+        try check(loaded.records.count == 1, "upsert 重放产生了重复记录")
+        try check(loaded.records.first?.id == record.id, "重放没有保持记录标识")
+        try check(loaded.records.first?.state == .applied, "重放没有恢复最终状态")
+        try check(loaded.records.first?.actions == record.actions, "重放没有恢复逐步动作")
+        let journalBytes = (try? Data(contentsOf: journal.journalURL(canvasKey: key)).count) ?? -1
+        try check(journalBytes == 0, "生成快照后没有截断增量日志")
+    }
+
+    private static func testOperationJournalPerformance() async throws {
+        let directory = temporaryDirectory(prefix: "JournalPerformance")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let diskStore = OperationJournalDiskStore(
+            directory: directory,
+            maximumRecords: 200,
+            compactionEventThreshold: 500,
+            compactionByteThreshold: 10_000_000
+        )
+        let journal = OperationJournalStore(diskStore: diskStore)
+        let key = "canvas"
+        var record = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "性能基线",
+            state: .pending
+        )
+        let started = ContinuousClock.now
+        for index in 0..<1_000 {
+            record.detail = "步骤 \(index)"
+            _ = try await journal.upsert(record, canvasKey: key)
+        }
+        let elapsed = started.duration(to: .now)
+        let loaded = try await journal.load(canvasKey: key)
+        try check(loaded.records.count == 1, "1000 次 upsert 重放后产生重复记录")
+        try check(loaded.records.first?.detail == "步骤 999", "1000 次追加没有恢复最终事件")
+        try check(elapsed < .seconds(10), "1000 次增量日志追加超过 10 秒预算：\(elapsed)")
+    }
+
+    private static func testOperationJournalRepairsPartialTail() throws {
+        let directory = temporaryDirectory(prefix: "JournalPartialTail")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let journal = OperationJournalDiskStore(directory: directory, compactionEventThreshold: 100)
+        let key = "partial-tail"
+        let first = OperationRecord(
+            category: .file,
+            kind: .createDocument,
+            summary: "已提交事件",
+            state: .pending
+        )
+        _ = try journal.append(.upsert([first]), canvasKey: key)
+        let journalURL = journal.journalURL(canvasKey: key)
+        let handle = try FileHandle(forWritingTo: journalURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"version\":1,\"mutation\":".utf8))
+        try handle.close()
+
+        let loadedBeforeRepair = try journal.load(canvasKey: key)
+        try check(loadedBeforeRepair.records.first?.id == first.id, "未完整尾行破坏了已提交记录")
+
+        var completed = first
+        completed.state = .applied
+        _ = try journal.append(.upsert([completed]), canvasKey: key)
+        let loadedAfterRepair = try journal.load(canvasKey: key)
+        try check(loadedAfterRepair.records.first?.state == .applied, "修剪半行后无法继续追加")
+
+        let corruptKey = "complete-corrupt-line"
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("not-json\n".utf8).write(to: journal.journalURL(canvasKey: corruptKey))
+        do {
+            _ = try journal.load(canvasKey: corruptKey)
+            throw SelfTestFailure(description: "已换行的损坏事件被错误忽略")
+        } catch is OperationHistoryStoreError {
+            // 完整行损坏必须严格阻断，只允许忽略最后未换行半行。
+        }
     }
 
     private static func testRelocateUndoRedo() throws {
@@ -659,6 +795,7 @@ struct SpatialFolderSelfTests {
         let sources = (0..<3).map { sourceFolder.appendingPathComponent("incoming-\($0).txt") }
         for source in sources { try Data(source.lastPathComponent.utf8).write(to: source) }
 
+        try await waitForOperationHistory(in: fixture.model)
         fixture.model.importFiles(sources)
         try check(fixture.model.fileOperationProgress != nil, "异步导入没有立即显示进度")
 
@@ -673,6 +810,118 @@ struct SpatialFolderSelfTests {
         let latest = try require(fixture.model.operationRecords.first, "异步导入没有操作记录")
         try check(latest.state == .applied, "异步导入记录没有落为已完成")
         try check(latest.actions.count == sources.count, "异步导入没有逐文件落账")
+    }
+
+    private static func testBackgroundShortFileOperations() async throws {
+        let fixture = try makeFixture(itemCount: 1, fileOperationsAsynchronously: true)
+        defer { fixture.cleanup() }
+
+        try await waitForOperationHistory(in: fixture.model)
+        fixture.model.createFolder()
+        try await waitForFileOperation(in: fixture.model)
+        try check(
+            FileManager.default.fileExists(atPath: fixture.folder.appendingPathComponent("新建文件夹").path),
+            "后台新建文件夹没有创建真实目录"
+        )
+
+        let item = try require(fixture.model.items.first(where: { $0.name.hasSuffix(".txt") }), "后台操作测试文件缺失")
+        fixture.model.toggleTag("红色\n6", for: item)
+        try await waitForFileOperation(in: fixture.model)
+        let tags = try item.url.resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
+        try check(tags.contains("红色"), "后台标签操作没有写入 Finder 标签：\(tags)")
+
+        fixture.model.rename(item, to: "renamed.txt")
+        try await waitForFileOperation(in: fixture.model)
+        try check(
+            FileManager.default.fileExists(atPath: fixture.folder.appendingPathComponent("renamed.txt").path),
+            "后台重命名没有生成目标文件"
+        )
+
+        try check(
+            fixture.model.operationRecords.suffix(3).allSatisfy { $0.state == .applied },
+            "短文件操作没有全部落为已完成"
+        )
+    }
+
+    private static func testRecoveryAnalyzerEvidence() async throws {
+        let base = temporaryDirectory(prefix: "RecoveryAnalyzer")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let created = base.appendingPathComponent("created.txt")
+        try Data("created".utf8).write(to: created)
+        let applied = OperationRecord(
+            category: .file,
+            kind: .createDocument,
+            summary: "新建文件",
+            state: .unavailable,
+            actions: [.materialize(MaterializeAction(destinationPath: created.path))]
+        )
+        let original = base.appendingPathComponent("original.txt")
+        let destination = base.appendingPathComponent("destination.txt")
+        try Data().write(to: original)
+        try Data().write(to: destination)
+        let ambiguous = OperationRecord(
+            category: .file,
+            kind: .rename,
+            summary: "重命名",
+            state: .unavailable,
+            actions: [.relocate(RelocateAction(
+                originalPath: original.path,
+                destinationPath: destination.path
+            ))]
+        )
+        let empty = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "尚未开始",
+            state: .pending
+        )
+        let partialTarget = base.appendingPathComponent("partial.txt")
+        try Data().write(to: partialTarget)
+        let partial = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "批量复制到一半",
+            itemNames: ["partial.txt", "not-yet-copied.txt"],
+            state: .pending,
+            actions: [.materialize(MaterializeAction(destinationPath: partialTarget.path))]
+        )
+        let disappeared = OperationRecord(
+            category: .file,
+            kind: .createDocument,
+            summary: "目标不明原因消失",
+            state: .undoing,
+            actions: [.materialize(MaterializeAction(destinationPath: base.appendingPathComponent("missing.txt").path))]
+        )
+        let cases = await RecoveryAnalyzer().analyze(records: [applied, ambiguous, empty, partial, disappeared])
+        try check(cases.first(where: { $0.recordID == applied.id })?.suggestedOutcome == .applied, "存在的创建目标没有识别为已完成")
+        try check(cases.first(where: { $0.recordID == ambiguous.id })?.suggestedOutcome == .manualReview, "原路径和目标同时存在时错误自动判断")
+        try check(cases.first(where: { $0.recordID == empty.id })?.suggestedOutcome == .manualReview, "无已提交步骤的 pending 记录被不安全地建议自动存档")
+        try check(cases.first(where: { $0.recordID == partial.id })?.suggestedOutcome == .manualReview, "部分批量步骤被误判为整批完成")
+        try check(cases.first(where: { $0.recordID == disappeared.id })?.suggestedOutcome == .manualReview, "缺少废纸篓证据时误判为已回滚")
+    }
+
+    private static func waitForFileOperation(
+        in model: FolderCanvasModel,
+        timeout: TimeInterval = 5
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        // 准备任务和执行任务之间会短暂切换 Task，但进度状态始终连续存在。
+        while model.fileOperationProgress != nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try check(model.fileOperationProgress == nil, "后台文件操作在期限内没有完成")
+    }
+
+    private static func waitForOperationHistory(
+        in model: FolderCanvasModel,
+        timeout: TimeInterval = 5
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while model.isLoadingOperationHistory, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try check(!model.isLoadingOperationHistory, "操作记录在期限内没有后台加载完成")
     }
 
     private static func testModelCreateFolderUndoRedo() throws {
@@ -975,6 +1224,38 @@ struct SpatialFolderSelfTests {
         fixture.model.placeFromInbox(targets)
         try check(targets.allSatisfy { !fixture.model.inboxIDs.contains($0.id) }, "批量放回主画布不完整")
         try check(targets.allSatisfy { fixture.model.positions[$0.id] != nil }, "批量放回没有生成位置")
+    }
+
+    private static func testDropLocationPlacement() throws {
+        let engine = CanvasLayoutEngine()
+        let size = CGSize(width: 1_200, height: 800)
+        let existing = [
+            CanvasLayoutItem(id: "existing-a", scale: 1.25),
+            CanvasLayoutItem(id: "existing-b", scale: 1.25)
+        ]
+        let before = [
+            "existing-a": CanvasPoint(x: 120, y: 120),
+            "existing-b": CanvasPoint(x: 360, y: 120)
+        ]
+        let imported = [
+            CanvasLayoutItem(id: "new-a", scale: 1.25),
+            CanvasLayoutItem(id: "new-b", scale: 1.25)
+        ]
+        let dropPoint = CGPoint(x: 900, y: 600)
+        let result = engine.placeImportedItems(
+            imported,
+            near: dropPoint,
+            existingItems: existing,
+            positions: before,
+            inboxIDs: [],
+            canvasSize: size
+        )
+        try check(result.positions["existing-a"] == before["existing-a"], "拖入时移动了第一个已有项目")
+        try check(result.positions["existing-b"] == before["existing-b"], "拖入时移动了第二个已有项目")
+        let first = try require(result.positions["new-a"], "第一个拖入项目没有落位")
+        let second = try require(result.positions["new-b"], "第二个拖入项目没有落位")
+        try check(first != second, "多个拖入项目重叠")
+        try check(abs(first.x - dropPoint.x) < 250 && abs(first.y - dropPoint.y) < 250, "首个项目没有放在落点附近")
     }
 
     private static func testGroupDragPreservesRelativeLayout() throws {

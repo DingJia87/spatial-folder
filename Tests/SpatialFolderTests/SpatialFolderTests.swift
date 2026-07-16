@@ -2,19 +2,17 @@ import Foundation
 import Testing
 @testable import SpatialFolder
 
-/// 2.4 的标准 SwiftPM 测试入口。
-/// 大型兼容性矩阵仍保留在 SelfTests；这里覆盖 CI 最需要尽早拦截的并发、性能和窗口状态。
-@Suite("空间文件夹 2.4 核心回归")
+@Suite("空间文件夹 2.5 核心回归")
 struct SpatialFolderTests {
     @Test("画布锁只允许一个写入者")
-    func sessionLockIsExclusive() throws {
+    func testSessionLockIsExclusive() throws {
         let directory = temporaryDirectory("Locks")
         defer { try? FileManager.default.removeItem(at: directory) }
         let first = try CanvasSessionLock.acquire(
             canvasKey: "test-canvas",
             directory: directory,
             processID: 100,
-            appVersion: "2.4.0"
+            appVersion: "2.5.0"
         )
         guard case let .acquired(lock) = first else {
             Issue.record("第一个会话没有取得锁")
@@ -24,7 +22,7 @@ struct SpatialFolderTests {
             canvasKey: "test-canvas",
             directory: directory,
             processID: 200,
-            appVersion: "2.4.0"
+            appVersion: "2.5.0"
         )
         guard case let .occupied(owner) = second else {
             Issue.record("第二个会话错误地取得了写入权")
@@ -36,7 +34,7 @@ struct SpatialFolderTests {
             canvasKey: "test-canvas",
             directory: directory,
             processID: 300,
-            appVersion: "2.4.0"
+            appVersion: "2.5.0"
         ) else {
             Issue.record("原会话释放后仍无法取得锁")
             return
@@ -44,7 +42,7 @@ struct SpatialFolderTests {
     }
 
     @Test("3000 项扫描保持在性能预算内")
-    func largeFirstLevelScan() throws {
+    func testLargeFirstLevelScan() throws {
         let folder = temporaryDirectory("Scan")
         defer { try? FileManager.default.removeItem(at: folder) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -59,11 +57,12 @@ struct SpatialFolderTests {
     }
 
     @Test("批量复制失败会回滚本批次")
-    func coordinatedTransferRollsBack() async throws {
+    func testCoordinatedTransferRollsBack() async throws {
         let root = temporaryDirectory("Coordinator")
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source", isDirectory: true)
         let target = root.appendingPathComponent("target", isDirectory: true)
+        let trash = root.appendingPathComponent("trash", isDirectory: true)
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         let valid = source.appendingPathComponent("valid.txt")
@@ -84,7 +83,9 @@ struct SpatialFolderTests {
             )
         ]
         do {
-            _ = try await FileOperationCoordinator().performTransfers(plans) { _ in }
+            _ = try await FileOperationCoordinator(fileOperationEngine: FileOperationEngine(
+                trashDirectoryForTesting: trash
+            )).performTransfers(plans) { _ in }
             Issue.record("缺失来源没有触发失败")
         } catch let failure as CoordinatedFileOperationFailure {
             #expect(failure.rollbackSucceeded)
@@ -94,8 +95,48 @@ struct SpatialFolderTests {
         }
     }
 
+    @Test("增量日志重放最终状态")
+    func testIncrementalJournalReplaysLatestState() async throws {
+        let directory = temporaryDirectory("Journal")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = OperationJournalStore(diskStore: OperationJournalDiskStore(
+            directory: directory,
+            compactionEventThreshold: 50
+        ))
+        var record = OperationRecord(
+            category: .file,
+            kind: .copyItems,
+            summary: "导入",
+            state: .pending
+        )
+        _ = try await store.upsert(record, canvasKey: "canvas")
+        record.state = .applied
+        record.actions = [.materialize(MaterializeAction(destinationPath: "/tmp/result"))]
+        _ = try await store.upsert(record, canvasKey: "canvas")
+        let loaded = try await store.load(canvasKey: "canvas")
+        #expect(loaded.records.count == 1)
+        #expect(loaded.records.first?.state == .applied)
+        #expect(loaded.records.first?.actions == record.actions)
+    }
+
+    @Test("投放点布局不移动已有项目")
+    func testDropPlacementPreservesExistingItems() {
+        let engine = CanvasLayoutEngine()
+        let before = ["existing": CanvasPoint(x: 120, y: 120)]
+        let result = engine.placeImportedItems(
+            [CanvasLayoutItem(id: "incoming", scale: 1.25)],
+            near: CGPoint(x: 800, y: 500),
+            existingItems: [CanvasLayoutItem(id: "existing", scale: 1.25)],
+            positions: before,
+            inboxIDs: [],
+            canvasSize: CGSize(width: 1_000, height: 700)
+        )
+        #expect(result.positions["existing"] == before["existing"])
+        #expect(result.positions["incoming"] != nil)
+    }
+
     @Test("普通窗口随宽度保持比例")
-    func normalWindowKeepsAspectRatio() {
+    func testNormalWindowKeepsAspectRatio() {
         let result = WindowAspectSizing.constrainedContentSize(
             proposedSize: CGSize(width: 1_000, height: 600),
             currentSize: CGSize(width: 800, height: 550),
@@ -106,7 +147,7 @@ struct SpatialFolderTests {
     }
 
     @Test("最大化窗口可绕开普通比例约束")
-    func maximumWindowProposalIsRecognized() {
+    func testMaximumWindowProposalIsRecognized() {
         #expect(WindowAspectSizing.isMaximumFrameProposal(
             proposedFrameSize: CGSize(width: 1_510, height: 980),
             visibleFrameSize: CGSize(width: 1_512, height: 982)
@@ -118,7 +159,7 @@ struct SpatialFolderTests {
     }
 
     @Test("全屏额外高度由背景覆盖")
-    func fullScreenPresentationCoversViewport() {
+    func testFullScreenPresentationCoversViewport() {
         let size = CanvasViewport.presentationSize(
             logicalSize: CGSize(width: 1_600, height: 900),
             viewportSize: CGSize(width: 1_600, height: 1_050),

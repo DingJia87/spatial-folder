@@ -70,6 +70,10 @@ struct ContentView: View {
             InboxPanelView()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $model.isRecoveryWizardPresented) {
+            RecoveryWizardView()
+                .environmentObject(model)
+        }
         .alert("重置当前布局？", isPresented: $resetConfirmationPresented) {
             Button("取消", role: .cancel) {}
             Button("重置", role: .destructive, action: model.resetLayout)
@@ -121,7 +125,7 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
                 Button(action: model.createFolder) { Label("新建文件夹", systemImage: "folder.badge.plus") }
-                    .disabled(model.sessionIsReadOnly || model.isFileOperationInProgress)
+                    .disabled(model.sessionIsReadOnly || model.isFileOperationInProgress || model.isLoadingOperationHistory)
                 Menu {
                     Button("选择图片…", action: model.chooseWallpaper)
                     Button("使用系统桌面壁纸") { model.setWallpaper(nil) }
@@ -151,9 +155,20 @@ struct ContentView: View {
                     Label(model.isLocked ? "已锁定" : "布局", systemImage: model.isLocked ? "lock.fill" : "square.grid.3x3")
                 }
                 Button { historyPresented = true } label: {
-                    Label("最近操作", systemImage: model.operationHistoryIsBlocked ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
+                    if model.isLoadingOperationHistory {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("最近操作", systemImage: model.operationHistoryIsBlocked ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
+                    }
                 }
+                .disabled(model.isLoadingOperationHistory)
                 .help(model.operationHistoryIsBlocked ? "操作记录需要修复" : "查看、撤销或重做最近操作")
+                if !model.recoveryCases.isEmpty {
+                    Button { model.isRecoveryWizardPresented = true } label: {
+                        Label("待恢复 \(model.recoveryCases.count)", systemImage: "cross.case.fill")
+                    }
+                    .help("核对上次未确认完成的文件操作")
+                }
                 if !model.inboxItems.isEmpty {
                     Button { inboxPresented = true } label: {
                         Label("待放置 \(model.inboxItems.count)", systemImage: "tray.full")
@@ -288,12 +303,90 @@ private struct OperationHistoryView: View {
             HStack {
                 Button("撤销", action: model.undoLastAction).disabled(!model.canUndo)
                 Button("重做", action: model.redoLastAction).disabled(!model.canRedo)
+                if !model.recoveryCases.isEmpty {
+                    Button("处理异常操作（\(model.recoveryCases.count)）") {
+                        dismiss()
+                        model.isRecoveryWizardPresented = true
+                    }
+                }
                 Spacer()
                 Button("导出诊断信息…", action: model.exportDiagnostics)
             }
             .padding()
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+}
+
+private struct RecoveryWizardView: View {
+    @EnvironmentObject private var model: FolderCanvasModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("异常恢复向导").font(.title2.weight(.semibold))
+                    Text("向导只读取磁盘证据并修正操作记录，不会移动、覆盖或删除任何文件。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("在访达中核对", action: model.revealRecoveryFolder)
+                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding()
+            Divider()
+
+            List {
+                ForEach(model.recoveryCases, id: \.recordID) { recoveryCase in
+                    VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text(recoveryCase.summary).font(.headline)
+                        Text(recoveryCase.currentState.title)
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary, in: Capsule())
+                        Spacer()
+                        Label(
+                            recoveryCase.suggestedOutcome.title,
+                            systemImage: recoveryCase.suggestedOutcome == .manualReview
+                                ? "exclamationmark.triangle.fill"
+                                : "checkmark.shield.fill"
+                        )
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(recoveryCase.suggestedOutcome == .manualReview ? .orange : .green)
+                    }
+                    Text(recoveryCase.explanation).font(.callout)
+                    ForEach(recoveryCase.evidence, id: \.id) { evidence in
+                        let isSupported = evidence.supportsApplied || evidence.supportsUndone
+                        HStack(alignment: .firstTextBaseline) {
+                            Image(systemName: isSupported ? "checkmark.circle" : "questionmark.circle")
+                                .foregroundStyle(isSupported ? Color.secondary : Color.orange)
+                            Text(evidence.itemName).lineLimit(1)
+                            Spacer()
+                            Text(evidence.observation).foregroundStyle(.secondary)
+                        }
+                        .font(.caption)
+                    }
+                    HStack {
+                        if recoveryCase.suggestedOutcome == .applied {
+                            Button("确认已完成") { model.resolveRecovery(recoveryCase, as: .applied) }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        if recoveryCase.suggestedOutcome == .undone {
+                            Button("确认已回滚") { model.resolveRecovery(recoveryCase, as: .undone) }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        Button("仅存档记录") { model.resolveRecovery(recoveryCase, as: .archived) }
+                    }
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .frame(minWidth: 760, minHeight: 520)
     }
 }
 
@@ -343,7 +436,12 @@ private struct FolderCanvasView: View {
                 .frame(width: presentationSize.width * displayScale,
                        height: presentationSize.height * displayScale,
                        alignment: .topLeading)
-                .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: receiveDroppedFiles)
+                .onDrop(
+                    of: [UTType.fileURL],
+                    delegate: CanvasFileDropDelegate(displayScale: displayScale) { providers, logicalPoint in
+                        receiveDroppedFiles(providers, at: logicalPoint)
+                    }
+                )
                 .contextMenu {
                     Menu("新建") {
                         Button("文件夹", action: model.createFolder)
@@ -378,12 +476,12 @@ private struct FolderCanvasView: View {
         }
     }
 
-    private func receiveDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+    private func receiveDroppedFiles(_ providers: [NSItemProvider], at logicalPoint: CGPoint) -> Bool {
         guard !providers.isEmpty else { return false }
         // NSItemProvider 会在任意线程、以任意顺序回调。先按原始序号收齐 URL，
         // 再一次性交给模型，保证一次拖入只有一条批量记录和一个冲突决策。
         let collector = DroppedURLCollector(count: providers.count) { urls in
-            model.importFiles(urls)
+            model.importFiles(urls, dropPoint: logicalPoint)
         }
         for (index, provider) in providers.enumerated() {
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
@@ -408,6 +506,23 @@ private struct FolderCanvasView: View {
     private func updateCurrentScreenSize() {
         guard let size = NSApp.keyWindow?.screen?.frame.size else { return }
         model.updateCanvasSize(size)
+    }
+}
+
+/// SwiftUI 的简化 onDrop 回调不提供鼠标坐标；DropDelegate 会保留投放位置，并把视图坐标
+/// 还原为逻辑画布坐标，保证不同显示器缩放下落点一致。
+private struct CanvasFileDropDelegate: DropDelegate {
+    let displayScale: CGFloat
+    let completion: ([NSItemProvider], CGPoint) -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [UTType.fileURL])
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let scale = max(0.01, displayScale)
+        let logicalPoint = CGPoint(x: info.location.x / scale, y: info.location.y / scale)
+        return completion(info.itemProviders(for: [UTType.fileURL]), logicalPoint)
     }
 }
 
@@ -732,9 +847,6 @@ private struct FileInfoView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        let attributes = (try? FileManager.default.attributesOfItem(atPath: item.url.path)) ?? [:]
-        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-        let modified = attributes[.modificationDate] as? Date
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
                 Image(nsImage: model.icon(for: item)).resizable().frame(width: 48, height: 48)
@@ -746,8 +858,15 @@ private struct FileInfoView: View {
             }
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
                 GridRow { Text("位置").foregroundStyle(.secondary); Text(item.url.deletingLastPathComponent().path).textSelection(.enabled) }
-                GridRow { Text("大小").foregroundStyle(.secondary); Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) }
-                if let modified {
+                GridRow {
+                    Text("大小").foregroundStyle(.secondary)
+                    if let snapshot = model.infoSnapshot {
+                        Text(ByteCountFormatter.string(fromByteCount: snapshot.size, countStyle: .file))
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                if let modified = model.infoSnapshot?.modificationDate {
                     GridRow { Text("修改日期").foregroundStyle(.secondary); Text(modified.formatted(date: .long, time: .shortened)) }
                 }
                 GridRow { Text("标签").foregroundStyle(.secondary); Text(item.tags.isEmpty ? "无" : item.tags.map { $0.components(separatedBy: "\n").first ?? $0 }.joined(separator: "、")) }

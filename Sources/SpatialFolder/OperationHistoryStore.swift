@@ -91,6 +91,7 @@ enum OperationState: String, Codable, Sendable {
     case superseded
     case failed
     case unavailable
+    case archived
     case viewOnly
 
     var title: String {
@@ -103,6 +104,7 @@ enum OperationState: String, Codable, Sendable {
         case .superseded: "已失效"
         case .failed: "失败"
         case .unavailable: "需核对"
+        case .archived: "已存档"
         case .viewOnly: "仅可查看"
         }
     }
@@ -264,7 +266,11 @@ struct OperationHistoryStore {
 
     func load(canvasKey: String) throws -> OperationHistoryDocument {
         let url = historyURL(canvasKey: canvasKey)
-        guard FileManager.default.fileExists(atPath: url.path) else { return OperationHistoryDocument() }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            // 测试工具和 2.4 兼容调用仍可读取已经迁移到 2.5 的快照与日志。
+            return try OperationJournalDiskStore(legacyStore: self)
+                .load(canvasKey: canvasKey, migrateLegacy: false)
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         guard let document = try? decoder.decode(OperationHistoryDocument.self, from: Data(contentsOf: url)) else {
