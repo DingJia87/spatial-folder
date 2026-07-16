@@ -17,4 +17,20 @@ enum CanvasViewport {
             displaySize.height / logicalSize.height
         )
     }
+
+    static func presentationSize(
+        logicalSize: CGSize,
+        viewportSize: CGSize,
+        displayScale: CGFloat
+    ) -> CGSize {
+        guard logicalSize.width > 0, logicalSize.height > 0,
+              viewportSize.width > 0, viewportSize.height > 0,
+              displayScale > 0 else {
+            return logicalSize
+        }
+        return CGSize(
+            width: max(logicalSize.width, viewportSize.width / displayScale),
+            height: max(logicalSize.height, viewportSize.height / displayScale)
+        )
+    }
 }

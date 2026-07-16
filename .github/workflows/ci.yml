@@ -1,0 +1,28 @@
+name: 2.5 质量检查
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+
+jobs:
+  macos-tests:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 显示 Swift 环境
+        run: swift --version
+
+      - name: 运行标准测试
+        run: ./scripts/run_standard_tests.zsh
+
+      - name: 运行完整兼容性回归
+        run: ./scripts/run_self_tests.zsh
+
+      - name: 严格 Release 构建
+        run: |
+          SDKROOT="$(./scripts/select_macos_sdk.zsh)" swift build -c release \
+            --disable-sandbox -Xswiftc -warnings-as-errors

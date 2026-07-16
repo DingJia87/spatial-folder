@@ -3,13 +3,11 @@ set -euo pipefail
 
 ROOT="${0:A:h:h}"
 SDK="$("$ROOT/scripts/select_macos_sdk.zsh")"
-CACHE="$ROOT/.build/module-cache"
-SCRATCH="$ROOT/.build/dev"
+CACHE="$ROOT/.build/standard-test-module-cache"
 
 mkdir -p "$CACHE"
 cd "$ROOT"
-
 SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$CACHE" \
-    swift build --disable-sandbox --scratch-path "$SCRATCH"
-
-exec "$SCRATCH/arm64-apple-macosx/debug/SpatialFolder"
+    swift test \
+    --disable-sandbox \
+    -Xswiftc -warnings-as-errors
