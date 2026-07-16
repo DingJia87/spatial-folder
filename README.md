@@ -10,7 +10,7 @@
 
 ## 下载和安装
 
-从 GitHub Releases 下载 `空间文件夹-v2.5.0.zip`：
+从 GitHub Releases 下载 [Spatial-Folder-v2.5.0-macOS-arm64.zip](https://github.com/DingJia87/spatial-folder/releases/download/v2.5.0/Spatial-Folder-v2.5.0-macOS-arm64.zip)：
 
 1. 解压后，把 `空间文件夹.app` 拖入“应用程序”。
 2. 第一次启动时，右键 App，选择“打开”。
