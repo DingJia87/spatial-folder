@@ -105,6 +105,7 @@
 
 2.5 包含 8 项标准 SwiftPM 测试和 63 项完整回归，GitHub Actions 会自动运行测试及严格 Release 构建。
 
+- [当前项目状态与新任务交接](docs/CURRENT_STATUS.md)
 - [文档索引](docs/README.md)
 - [2.5 发布说明](docs/releases/RELEASE_NOTES_2.5.md)
 - [2.5 开发与验收计划](docs/plans/PLAN_2.5.md)

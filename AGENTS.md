@@ -6,6 +6,18 @@ Build a native macOS application that presents the *first-level contents* of a u
 
 The product serves people who use spatial memory: documents and folders are recognised by their lasting visual position, not only by names or folder trees.
 
+## Continuation protocol
+
+Before changing code in a new Codex task:
+
+1. Read this file, `README.md`, `docs/CURRENT_STATUS.md`, and `docs/README.md`.
+2. Confirm the repository root and run `git status -sb` before editing.
+3. Treat `Release/2.5.0/` as the current frozen usable package; do not overwrite it during development.
+4. Develop on a separate `codex/` branch, preserve real-file safety rules, and run the standard and self-test suites before packaging.
+5. Package only after the user has validated the development build unless the user explicitly asks otherwise.
+
+The current local repository root is `/Users/dingjia/Codexdata/虚拟化桌面项目`. The live project state and handoff notes are maintained in `docs/CURRENT_STATUS.md`.
+
 ## Non-negotiable behaviour
 
 - The underlying folder and its files are real. The app must never create substitute links or duplicate files merely to display a canvas.
