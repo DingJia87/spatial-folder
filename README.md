@@ -105,10 +105,21 @@
 
 2.5 包含 8 项标准 SwiftPM 测试和 63 项完整回归，GitHub Actions 会自动运行测试及严格 Release 构建。
 
-- [2.5 发布说明](RELEASE_NOTES_2.5.md)
-- [2.5 开发与验收计划](PLAN_2.5.md)
-- [2.5 代码维护手册](MAINTENANCE_2.5.md)
-- [2.5 性能基线](PERFORMANCE_2.5.md)
+- [文档索引](docs/README.md)
+- [2.5 发布说明](docs/releases/RELEASE_NOTES_2.5.md)
+- [2.5 开发与验收计划](docs/plans/PLAN_2.5.md)
+- [2.5 代码维护手册](docs/maintenance/MAINTENANCE_2.5.md)
+- [2.5 性能基线](docs/performance/PERFORMANCE_2.5.md)
+
+## 项目结构
+
+- `Sources/SpatialFolder`：生产代码和内置 Office 空白模板。
+- `Tests`：标准测试、完整自测和性能基线入口。
+- `scripts`：开发启动、测试、性能和打包脚本。
+- `config`：发布环境配置。
+- `Assets`：App 图标与打包元数据。
+- `docs`：按计划、发布、维护、性能和技术资料分类的版本文档。
+- `Release`：本地构建产物与历史压缩包，不纳入 Git；对外发布以 GitHub Releases 为准。
 
 ## 反馈建议
 

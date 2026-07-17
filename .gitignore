@@ -1,6 +1,10 @@
+# macOS 与本地 IDE 状态
 .DS_Store
-.build/
-Release/
 *.xcuserstate
+
+# SwiftPM / Xcode 可重建产物
+.build/
 DerivedData/
-Development/
+
+# 本地安装包与历史发布归档；正式分发使用 GitHub Releases
+Release/
