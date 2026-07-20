@@ -105,7 +105,13 @@ final class FolderCanvasModel: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var appearanceMode: String
     @Published private(set) var recentFolders: [URL] = []
-    @Published var searchText = ""
+    @Published var searchText = "" {
+        didSet {
+            if searchText != oldValue { removeHiddenItemsFromSelection() }
+        }
+    }
+    @Published private(set) var selectedTagColors: Set<FinderTagColor> = []
+    @Published private(set) var includesUntaggedInFilter = false
     @Published var infoItem: FolderItem?
     @Published private(set) var infoSnapshot: FileInfoSnapshot?
     @Published private(set) var recoveryCases: [RecoveryCase] = []
@@ -187,17 +193,24 @@ final class FolderCanvasModel: ObservableObject {
         }
     }
 
-    var selectedItems: [FolderItem] { items.filter { selectedIDs.contains($0.id) } }
+    /// 批量命令只能作用于用户当前看得见的选择，避免筛选后误操作隐藏文件。
+    var selectedItems: [FolderItem] { displayedItems.filter { selectedIDs.contains($0.id) } }
 
     var displayedItems: [FolderItem] {
         matchingItems.filter { !inboxIDs.contains($0.id) }
     }
 
     var inboxItems: [FolderItem] {
-        matchingItems.filter { inboxIDs.contains($0.id) }
+        items.filter { inboxIDs.contains($0.id) }
     }
 
     var desktopCanvasSize: CGSize { canvasSize }
+
+    var hasActiveFilters: Bool { itemFilter.isActive }
+
+    var activeTagFilterCount: Int {
+        selectedTagColors.count + (includesUntaggedInFilter ? 1 : 0)
+    }
 
     /// 统一供界面和命令判断，避免只在按钮层禁用而底层仍然修改布局。
     var canEditLayout: Bool {
@@ -216,13 +229,42 @@ final class FolderCanvasModel: ObservableObject {
         return NSWorkspace.shared.desktopImageURL(for: screen)
     }
 
+    private var itemFilter: CanvasItemFilter {
+        CanvasItemFilter(
+            query: searchText,
+            tagColors: selectedTagColors,
+            includesUntagged: includesUntaggedInFilter
+        )
+    }
+
     private var matchingItems: [FolderItem] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return items }
-        return items.filter {
-            $0.name.localizedCaseInsensitiveContains(query) ||
-            $0.tags.contains { normalizedTagName($0).localizedCaseInsensitiveContains(query) }
+        let filter = itemFilter
+        guard filter.isActive else { return items }
+        return items.filter(filter.matches)
+    }
+
+    func toggleTagFilter(_ color: FinderTagColor) {
+        if !selectedTagColors.insert(color).inserted {
+            selectedTagColors.remove(color)
         }
+        removeHiddenItemsFromSelection()
+    }
+
+    func toggleUntaggedFilter() {
+        includesUntaggedInFilter.toggle()
+        removeHiddenItemsFromSelection()
+    }
+
+    func clearFilters() {
+        searchText = ""
+        selectedTagColors = []
+        includesUntaggedInFilter = false
+        removeHiddenItemsFromSelection()
+    }
+
+    private func removeHiddenItemsFromSelection() {
+        let visibleIDs = Set(displayedItems.map(\.id))
+        selectedIDs.formIntersection(visibleIDs)
     }
 
     // MARK: - 外观、空间打开与目录扫描
@@ -262,6 +304,7 @@ final class FolderCanvasModel: ObservableObject {
         sessionLock = nil
         sessionIsReadOnly = false
         sessionLockOwner = nil
+        clearFilters()
         folderURL = standardized
         rootResourceID = persistentResourceIdentifier(for: standardized) ?? "path:\(standardized.path)"
         canvasKey = rootResourceID.map(layoutStore.canvasKey(for:))
@@ -334,6 +377,7 @@ final class FolderCanvasModel: ObservableObject {
         items = freshItems
         let currentPaths = Set(freshItems.map(\.id))
         selectedIDs.formIntersection(currentPaths)
+        removeHiddenItemsFromSelection()
 
         var changed = reconcileResourcePaths(freshItems)
         guard !layoutIsBlocked else { return }
@@ -961,9 +1005,13 @@ final class FolderCanvasModel: ObservableObject {
     func toggleTag(_ tag: String, for targetItems: [FolderItem]) {
         guard realFileMutationsAllowed(), !targetItems.isEmpty else { return }
         let normalized = normalizedTagName(tag)
+        let targetColor = FinderTagColor(finderTag: tag)
         let tagActions = targetItems.map { item -> TagAction in
             var tags = item.tags
-            if let index = tags.firstIndex(where: { normalizedTagName($0) == normalized }) {
+            if let targetColor,
+               tags.contains(where: { FinderTagColor(finderTag: $0) == targetColor }) {
+                tags.removeAll { FinderTagColor(finderTag: $0) == targetColor }
+            } else if let index = tags.firstIndex(where: { normalizedTagName($0) == normalized }) {
                 tags.remove(at: index)
             } else {
                 tags.append(tag)
@@ -1839,7 +1887,10 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func hasTag(_ tag: String, in item: FolderItem) -> Bool {
-        item.tags.contains { normalizedTagName($0) == normalizedTagName(tag) }
+        if let color = FinderTagColor(finderTag: tag) {
+            return item.tags.contains { FinderTagColor(finderTag: $0) == color }
+        }
+        return item.tags.contains { normalizedTagName($0) == normalizedTagName(tag) }
     }
 
     func normalizedTagName(_ tag: String) -> String {

@@ -124,8 +124,7 @@ struct ContentView: View {
                 TextField("筛选当前空间", text: $model.searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 180)
-                Button(action: model.createFolder) { Label("新建文件夹", systemImage: "folder.badge.plus") }
-                    .disabled(model.sessionIsReadOnly || model.isFileOperationInProgress || model.isLoadingOperationHistory)
+                tagFilterMenu
                 Menu {
                     Button("选择图片…", action: model.chooseWallpaper)
                     Button("使用系统桌面壁纸") { model.setWallpaper(nil) }
@@ -197,6 +196,44 @@ struct ContentView: View {
                 )
             }
         }
+    }
+
+    private var tagFilterMenu: some View {
+        Menu {
+            ForEach(FinderTagColor.displayOrder) { color in
+                Button {
+                    model.toggleTagFilter(color)
+                } label: {
+                    Label {
+                        Text(color.title)
+                    } icon: {
+                        Image(systemName: model.selectedTagColors.contains(color)
+                            ? "checkmark.circle.fill"
+                            : "circle.fill")
+                            .foregroundStyle(color.color)
+                    }
+                }
+            }
+            Divider()
+            Button {
+                model.toggleUntaggedFilter()
+            } label: {
+                if model.includesUntaggedInFilter {
+                    Label("无标签", systemImage: "checkmark")
+                } else {
+                    Text("无标签")
+                }
+            }
+            Divider()
+            Button("清除筛选", action: model.clearFilters)
+                .disabled(!model.hasActiveFilters)
+        } label: {
+            Label(
+                model.activeTagFilterCount == 0 ? "标签" : "标签 \(model.activeTagFilterCount)",
+                systemImage: model.activeTagFilterCount == 0 ? "tag" : "tag.fill"
+            )
+        }
+        .help("按 Finder 标签颜色筛选；多种颜色之间为任一匹配")
     }
 
     /// 长文件操作的非阻塞进度条；取消会等待当前系统调用结束后回滚。
@@ -466,6 +503,19 @@ private struct FolderCanvasView: View {
                     .padding(12)
             }
         }
+        .overlay {
+            if model.displayedItems.isEmpty && model.hasActiveFilters {
+                ContentUnavailableView {
+                    Label("没有匹配项目", systemImage: "line.3.horizontal.decrease.circle")
+                } description: {
+                    Text("主画布中没有同时满足搜索和标签条件的项目。")
+                } actions: {
+                    Button("清除筛选", action: model.clearFilters)
+                }
+                .padding(24)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
+        }
         .onAppear(perform: updateCurrentScreenSize)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)) { notification in
             guard let window = notification.object as? NSWindow, window == NSApp.keyWindow else { return }
@@ -657,7 +707,7 @@ private struct CanvasIcon: View {
             Button("分享…") { model.share(contextItems) }
             Divider()
             Menu("标签") {
-                ForEach(FinderTag.allCases) { tag in
+                ForEach(FinderTagColor.displayOrder) { tag in
                     Button {
                         model.toggleTag(tag.encodedValue, for: contextItems)
                     } label: {
@@ -715,15 +765,7 @@ private struct CanvasIcon: View {
     }
 
     private func tagColor(_ tag: String) -> Color {
-        switch model.normalizedTagName(tag).lowercased() {
-        case "红色", "red": return Color.red
-        case "橙色", "orange": return Color.orange
-        case "黄色", "yellow": return Color.yellow
-        case "绿色", "green": return Color.green
-        case "蓝色", "blue": return Color.blue
-        case "紫色", "purple": return Color.purple
-        default: return Color.gray
-        }
+        FinderTagColor(finderTag: tag)?.color ?? .gray
     }
 }
 
@@ -813,30 +855,16 @@ private struct InboxPanelView: View {
     }
 }
 
-private enum FinderTag: CaseIterable, Identifiable {
-    case red, orange, yellow, green, blue, purple, gray
-
-    var id: String { encodedValue }
-    var title: String {
+private extension FinderTagColor {
+    var color: Color {
         switch self {
-        case .red: "红色"
-        case .orange: "橙色"
-        case .yellow: "黄色"
-        case .green: "绿色"
-        case .blue: "蓝色"
-        case .purple: "紫色"
-        case .gray: "灰色"
-        }
-    }
-    var encodedValue: String {
-        switch self {
-        case .red: "红色\n6"
-        case .orange: "橙色\n7"
-        case .yellow: "黄色\n5"
-        case .green: "绿色\n2"
-        case .blue: "蓝色\n4"
-        case .purple: "紫色\n3"
-        case .gray: "灰色\n1"
+        case .red: .red
+        case .orange: .orange
+        case .yellow: .yellow
+        case .green: .green
+        case .blue: .blue
+        case .purple: .purple
+        case .gray: .gray
         }
     }
 }

@@ -11,6 +11,13 @@
 - `performance/`：可重复执行的性能基线与结果。
 - `technical/`：早期版本的技术说明。
 
+## 当前 2.6 文档
+
+- `plans/PLAN_2.6.md`：标签筛选与隐藏选择安全修复的范围、规则和验收证据。
+- `releases/RELEASE_NOTES_2.6.md`：2.6 用户可见变化和升级边界。
+- `maintenance/MAINTENANCE_2.6.md`：Finder 标签编码、筛选组合及选择安全不变量。
+- `performance/PERFORMANCE_2.6.md`：保留 Finder 颜色编号后的扫描性能基线。
+
 ## 历史源码保全
 
 2026-07-17 清理旧工作目录前，已将两份未提交但具有独有内容的工作状态保存为本仓库归档分支：
@@ -22,4 +29,4 @@
 
 ## 本地发布物
 
-`Release/2.5.0/` 保留当前可运行 App 和压缩包；旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
+`Release/2.6.0/` 保留当前可运行 App 和压缩包；用户可见的开发候选以后也统一放入 `Release/<版本>/` 并在名称中标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。

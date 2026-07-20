@@ -31,6 +31,7 @@ struct SpatialFolderSelfTests {
         run("新建事务撤销后保留内容") { try testMaterializeUndoRedo() }
         run("废纸篓事务撤销与重做") { try testDiscardUndoRedo() }
         run("Finder 标签事务撤销与重做") { try testTagUndoRedo() }
+        run("Finder 标签扫描保留颜色编号") { try testTagScanPreservesColorNumber() }
         run("恢复冲突保留两者") { try testConflictKeepBoth() }
         run("恢复冲突替换后可逆") { try testConflictReplaceRoundTrip() }
         run("多项撤销预检防止部分执行") { try testMultiActionPreflightPreventsPartialUndo() }
@@ -60,9 +61,12 @@ struct SpatialFolderSelfTests {
         run("70 项目进入 64+6 布局") { try testSeventyItemOverflow() }
         run("待放置区与主画布交换") { try testInboxSwap() }
         run("待放置区批量放回") { try testBatchInboxPlacement() }
+        run("顶部筛选不隐藏待放置区") { try testCanvasFiltersDoNotHideInbox() }
         run("外部拖入按落点排列且不移动已有项目") { try testDropLocationPlacement() }
         run("多选整体拖动保持相对位置") { try testGroupDragPreservesRelativeLayout() }
         run("多选批量副本和废纸篓") { try testBatchDuplicateAndTrash() }
+        run("筛选不会让隐藏选择参与批量操作") { try testFiltersExcludeHiddenSelection() }
+        run("搜索和标签筛选切换空间后清空") { try testFiltersResetWhenOpeningSpace() }
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
         run("撤销、重做和锁定") { try testUndoRedoAndLock() }
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
@@ -443,6 +447,20 @@ struct SpatialFolderSelfTests {
         let redoneTags = try URL(fileURLWithPath: file.path)
             .resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
         try check(redoneTags == ["红色"], "重做没有恢复 Finder 标签：\(redoneTags)")
+    }
+
+    private static func testTagScanPreservesColorNumber() throws {
+        let base = temporaryDirectory(prefix: "TagScan")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let file = base.appendingPathComponent("tagged.txt")
+        try Data("tag".utf8).write(to: file)
+        try writeFinderTags(["自定义红色名称\n6"], to: file)
+
+        let entries = try FolderDirectoryScanner().scan(folder: base)
+        let entry = try require(entries.first, "扫描没有返回标签测试文件")
+        try check(entry.tags.first?.contains("\n6") == true, "扫描丢失 Finder 标签颜色编号：\(entry.tags)")
+        try check(FinderTagColor(finderTag: entry.tags[0]) == .red, "自定义标签没有按编号识别为红色")
     }
 
     private static func testConflictKeepBoth() throws {
@@ -1292,6 +1310,74 @@ struct SpatialFolderSelfTests {
         try check(targets.allSatisfy { !FileManager.default.fileExists(atPath: $0.url.path) }, "批量废纸篓仍保留原文件")
         try check(fixture.model.operationRecords.last?.kind == .trash, "批量废纸篓没有生成统一记录")
         try check(fixture.model.operationRecords.last?.actions.count == 2, "批量废纸篓没有逐项记录")
+    }
+
+    private static func testFiltersExcludeHiddenSelection() throws {
+        let fixture = try makeFixture(itemCount: 3)
+        defer { fixture.cleanup() }
+        let firstURL = fixture.folder.appendingPathComponent("item-000.txt")
+        let secondURL = fixture.folder.appendingPathComponent("item-001.txt")
+        try writeFinderTags(["自定义红色\n6"], to: firstURL)
+        try writeFinderTags(["自定义绿色\n2"], to: secondURL)
+        fixture.model.refreshItems()
+
+        let first = try require(
+            fixture.model.items.first { $0.name == "item-000.txt" },
+            "缺少红色测试项目，当前：\(fixture.model.items.map(\.name))"
+        )
+        let second = try require(
+            fixture.model.items.first { $0.name == "item-001.txt" },
+            "缺少绿色测试项目，当前：\(fixture.model.items.map(\.name))"
+        )
+        let third = try require(fixture.model.items.first { $0.id != first.id && $0.id != second.id }, "缺少无标签测试项目")
+        let positionsBefore = fixture.model.positions
+
+        fixture.model.select(first, extendingSelection: false)
+        fixture.model.select(second, extendingSelection: true)
+        fixture.model.select(third, extendingSelection: true)
+        fixture.model.toggleTagFilter(.red)
+        try check(fixture.model.displayedItems.map(\.id) == [first.id], "红色筛选结果不正确")
+        try check(fixture.model.selectedIDs == [first.id], "标签筛选后仍保留隐藏项目选择")
+        try check(fixture.model.contextItems(for: first).map(\.id) == [first.id], "批量菜单仍包含隐藏选择")
+
+        fixture.model.toggleTagFilter(.green)
+        try check(Set(fixture.model.displayedItems.map(\.id)) == [first.id, second.id], "多颜色筛选没有使用 OR")
+        fixture.model.searchText = second.name
+        try check(fixture.model.displayedItems.map(\.id) == [second.id], "搜索与标签筛选没有使用 AND")
+
+        fixture.model.clearFilters()
+        fixture.model.toggleUntaggedFilter()
+        try check(fixture.model.displayedItems.map(\.id) == [third.id], "无标签筛选结果不正确")
+        try check(fixture.model.positions == positionsBefore, "切换筛选改变了画布位置")
+    }
+
+    private static func testFiltersResetWhenOpeningSpace() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        fixture.model.searchText = "不会匹配"
+        fixture.model.toggleTagFilter(.red)
+        fixture.model.toggleUntaggedFilter()
+        try check(fixture.model.hasActiveFilters, "测试没有建立筛选状态")
+
+        fixture.model.open(folder: fixture.folder)
+
+        try check(fixture.model.searchText.isEmpty, "切换空间后搜索没有清空")
+        try check(fixture.model.selectedTagColors.isEmpty, "切换空间后颜色筛选没有清空")
+        try check(!fixture.model.includesUntaggedInFilter, "切换空间后无标签筛选没有清空")
+        try check(fixture.model.displayedItems.count == 1, "切换空间后项目仍被旧筛选隐藏")
+    }
+
+    private static func testCanvasFiltersDoNotHideInbox() throws {
+        let fixture = try makeFixture(itemCount: 70)
+        defer { fixture.cleanup() }
+        let inboxBefore = fixture.model.inboxItems.map(\.id)
+        try check(inboxBefore.count == 6, "测试没有建立待放置区")
+
+        fixture.model.searchText = "不会匹配任何项目"
+        fixture.model.toggleTagFilter(.red)
+
+        try check(fixture.model.displayedItems.isEmpty, "主画布筛选没有生效")
+        try check(fixture.model.inboxItems.map(\.id) == inboxBefore, "顶部筛选隐藏了待放置区项目")
     }
 
     private static func testExternalRenameKeepsPosition() throws {
