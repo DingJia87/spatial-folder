@@ -2,8 +2,67 @@ import Foundation
 import Testing
 @testable import SpatialFolder
 
-@Suite("空间文件夹 2.5 核心回归")
+@Suite("空间文件夹 4.0 核心回归")
 struct SpatialFolderTests {
+    @Test("桌面收纳筛选保留文件夹并排除危险项目")
+    func testDesktopCollectionSourceFiltering() async throws {
+        let root = temporaryDirectory("DesktopCollection")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let desktop = root.appendingPathComponent("Desktop", isDirectory: true)
+        let targetContainer = desktop.appendingPathComponent("目标容器", isDirectory: true)
+        let destination = targetContainer.appendingPathComponent("当前空间", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data("report".utf8).write(to: desktop.appendingPathComponent("报告.txt"))
+        let project = desktop.appendingPathComponent("项目资料", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try Data("inside".utf8).write(to: project.appendingPathComponent("内部.txt"))
+        try Data("hidden".utf8).write(to: desktop.appendingPathComponent(".hidden"))
+        try Data("pending".utf8).write(to: desktop.appendingPathComponent("下载中.crdownload"))
+
+        let sources = try await FolderAccessRepository().desktopCollectionSources(
+            in: desktop,
+            destinationFolder: destination
+        )
+        #expect(sources.map(\.lastPathComponent) == ["报告.txt", "项目资料"])
+    }
+
+    @Test("Finder 标签颜色按编号识别")
+    func testFinderTagColorUsesEncodedNumber() {
+        #expect(FinderTagColor(finderTag: "紧急\n6") == .red)
+        #expect(FinderTagColor(finderTag: "紧急\n6\n0") == .red)
+        #expect(FinderTagColor(finderTag: "自定义名称\n2") == .green)
+        #expect(FinderTagColor(finderTag: "Blue") == .blue)
+        #expect(FinderTagColor(finderTag: "无颜色") == nil)
+    }
+
+    @Test("搜索和多标签筛选按 AND 与 OR 组合")
+    func testCanvasItemFilterCombination() {
+        let red = FolderItem(
+            url: URL(fileURLWithPath: "/tmp/季度报告.txt"),
+            tags: ["紧急\n6"],
+            resourceID: nil
+        )
+        let green = FolderItem(
+            url: URL(fileURLWithPath: "/tmp/季度预算.txt"),
+            tags: ["财务\n2"],
+            resourceID: nil
+        )
+        let untagged = FolderItem(
+            url: URL(fileURLWithPath: "/tmp/会议记录.txt"),
+            tags: [],
+            resourceID: nil
+        )
+        let filter = CanvasItemFilter(
+            query: "季度",
+            tagColors: [.red, .green],
+            includesUntagged: false
+        )
+        #expect(filter.matches(red))
+        #expect(filter.matches(green))
+        #expect(!filter.matches(untagged))
+        #expect(CanvasItemFilter(includesUntagged: true).matches(untagged))
+    }
+
     @Test("画布锁只允许一个写入者")
     func testSessionLockIsExclusive() throws {
         let directory = temporaryDirectory("Locks")
@@ -12,7 +71,7 @@ struct SpatialFolderTests {
             canvasKey: "test-canvas",
             directory: directory,
             processID: 100,
-            appVersion: "2.5.0"
+            appVersion: "2.6.0"
         )
         guard case let .acquired(lock) = first else {
             Issue.record("第一个会话没有取得锁")
@@ -22,7 +81,7 @@ struct SpatialFolderTests {
             canvasKey: "test-canvas",
             directory: directory,
             processID: 200,
-            appVersion: "2.5.0"
+            appVersion: "2.6.0"
         )
         guard case let .occupied(owner) = second else {
             Issue.record("第二个会话错误地取得了写入权")
@@ -34,7 +93,7 @@ struct SpatialFolderTests {
             canvasKey: "test-canvas",
             directory: directory,
             processID: 300,
-            appVersion: "2.5.0"
+            appVersion: "2.6.0"
         ) else {
             Issue.record("原会话释放后仍无法取得锁")
             return
@@ -133,6 +192,42 @@ struct SpatialFolderTests {
         )
         #expect(result.positions["existing"] == before["existing"])
         #expect(result.positions["incoming"] != nil)
+    }
+
+    @Test("桌面收纳项目叠放并整体避开已有图标")
+    func testDesktopCollectionStackPlacement() {
+        let engine = CanvasLayoutEngine()
+        let occupiedAnchor = CanvasPoint(x: 1_080, y: 624)
+        let before = ["existing": occupiedAnchor]
+        let imported = [
+            CanvasLayoutItem(id: "folder", scale: 1.25),
+            CanvasLayoutItem(id: "file-a", scale: 1.25),
+            CanvasLayoutItem(id: "file-b", scale: 1.25)
+        ]
+        let requestedResult = engine.stackImportedItems(
+            imported,
+            near: CGPoint(x: 1_068, y: 620),
+            existingItems: [],
+            positions: [:],
+            inboxIDs: [],
+            canvasSize: CGSize(width: 1_200, height: 800)
+        )
+        #expect(requestedResult.positions["folder"] == occupiedAnchor)
+
+        let result = engine.stackImportedItems(
+            imported,
+            near: CGPoint(x: 1_068, y: 620),
+            existingItems: [CanvasLayoutItem(id: "existing", scale: 1.25)],
+            positions: before,
+            inboxIDs: [],
+            canvasSize: CGSize(width: 1_200, height: 800)
+        )
+        #expect(result.positions["existing"] == occupiedAnchor)
+        let stackPoints = imported.compactMap { result.positions[$0.id] }
+        #expect(stackPoints.count == imported.count)
+        #expect(stackPoints.allSatisfy { $0 == stackPoints.first })
+        #expect(stackPoints.first != occupiedAnchor)
+        #expect(result.placedIDs == imported.map(\.id))
     }
 
     @Test("普通窗口随宽度保持比例")

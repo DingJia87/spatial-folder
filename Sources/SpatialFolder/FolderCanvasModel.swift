@@ -37,6 +37,11 @@ private struct PreparedImport: Sendable {
     var plans: [FileTransferPlan]
 }
 
+private struct PreparedDesktopCollection: Sendable {
+    var sources: [URL]
+    var plans: [FileTransferPlan]
+}
+
 private struct PreparedRename: Sendable {
     var destination: URL
     var replacesExisting: Bool
@@ -74,6 +79,7 @@ final class FolderCanvasModel: ObservableObject {
     private let folderAccessRepository: FolderAccessRepository
     private let recoveryAnalyzer: RecoveryAnalyzer
     private let fileOperationsAsynchronously: Bool
+    private let desktopDirectoryURL: URL
     private let layoutEngine = CanvasLayoutEngine()
     private let iconCache = FileIconCache()
 
@@ -103,9 +109,16 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var canvasSize: CGSize
     @Published private(set) var currentDisplaySize: CGSize
     @Published var errorMessage: String?
+    @Published private(set) var statusMessage: String?
     @Published private(set) var appearanceMode: String
     @Published private(set) var recentFolders: [URL] = []
-    @Published var searchText = ""
+    @Published var searchText = "" {
+        didSet {
+            if searchText != oldValue { removeHiddenItemsFromSelection() }
+        }
+    }
+    @Published private(set) var selectedTagColors: Set<FinderTagColor> = []
+    @Published private(set) var includesUntaggedInFilter = false
     @Published var infoItem: FolderItem?
     @Published private(set) var infoSnapshot: FileInfoSnapshot?
     @Published private(set) var recoveryCases: [RecoveryCase] = []
@@ -131,6 +144,8 @@ final class FolderCanvasModel: ObservableObject {
     private var redoStack: [LayoutHistoryEntry] = []
     private var conflictResolution: ((ConflictChoice) -> Void)?
     private var pendingDropPoints: [UUID: CGPoint] = [:]
+    private var pendingDesktopCollectionIDs: Set<UUID> = []
+    private var statusDismissTask: Task<Void, Never>?
     /// 持有对象即代表当前进程拥有这张画布的唯一写入权。
     private var sessionLock: CanvasSessionLock?
 
@@ -146,7 +161,8 @@ final class FolderCanvasModel: ObservableObject {
         sessionLockingEnabled: Bool = true,
         directoryScanner: FolderDirectoryScanner = FolderDirectoryScanner(),
         scansAsynchronously: Bool = true,
-        fileOperationsAsynchronously: Bool = true
+        fileOperationsAsynchronously: Bool = true,
+        desktopDirectoryURL: URL? = nil
     ) {
         self.layoutStore = layoutStore
         self.operationStore = operationStore
@@ -164,6 +180,11 @@ final class FolderCanvasModel: ObservableObject {
         folderAccessRepository = FolderAccessRepository(fileManager: fileOperationEngine.fileManager)
         recoveryAnalyzer = RecoveryAnalyzer(fileManager: fileOperationEngine.fileManager)
         self.fileOperationsAsynchronously = fileOperationsAsynchronously
+        self.desktopDirectoryURL = (
+            desktopDirectoryURL
+                ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+        ).standardizedFileURL
         let startingSize = initialCanvasSize ?? NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
         canvasSize = startingSize
         currentDisplaySize = startingSize
@@ -187,17 +208,24 @@ final class FolderCanvasModel: ObservableObject {
         }
     }
 
-    var selectedItems: [FolderItem] { items.filter { selectedIDs.contains($0.id) } }
+    /// 批量命令只能作用于用户当前看得见的选择，避免筛选后误操作隐藏文件。
+    var selectedItems: [FolderItem] { displayedItems.filter { selectedIDs.contains($0.id) } }
 
     var displayedItems: [FolderItem] {
         matchingItems.filter { !inboxIDs.contains($0.id) }
     }
 
     var inboxItems: [FolderItem] {
-        matchingItems.filter { inboxIDs.contains($0.id) }
+        items.filter { inboxIDs.contains($0.id) }
     }
 
     var desktopCanvasSize: CGSize { canvasSize }
+
+    var hasActiveFilters: Bool { itemFilter.isActive }
+
+    var activeTagFilterCount: Int {
+        selectedTagColors.count + (includesUntaggedInFilter ? 1 : 0)
+    }
 
     /// 统一供界面和命令判断，避免只在按钮层禁用而底层仍然修改布局。
     var canEditLayout: Bool {
@@ -205,7 +233,33 @@ final class FolderCanvasModel: ObservableObject {
             !isLoadingOperationHistory && !isLocked
     }
 
+    /// 锁定只保护图标布局；壁纸属于显示偏好，锁定时仍应允许调整。
+    var canChangeWallpaper: Bool {
+        folderURL != nil && !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly &&
+            !isLoadingOperationHistory
+    }
+
     var isFileOperationInProgress: Bool { fileOperationProgress != nil }
+
+    var canCollectDesktopItems: Bool {
+        guard let folderURL else { return false }
+        return folderURL.standardizedFileURL != desktopDirectoryURL &&
+            !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly &&
+            !isLoadingOperationHistory && !operationHistoryIsBlocked &&
+            !isFileOperationInProgress
+    }
+
+    func pileCount(for item: FolderItem) -> Int {
+        guard let point = positions[item.id] else { return 0 }
+        return displayedItems.reduce(into: 0) { count, candidate in
+            if positions[candidate.id] == point { count += 1 }
+        }
+    }
+
+    func isTopOfPile(_ item: FolderItem) -> Bool {
+        guard let point = positions[item.id] else { return false }
+        return displayedItems.last { positions[$0.id] == point }?.id == item.id
+    }
 
     func icon(for item: FolderItem) -> NSImage {
         iconCache.icon(for: item.url)
@@ -216,13 +270,42 @@ final class FolderCanvasModel: ObservableObject {
         return NSWorkspace.shared.desktopImageURL(for: screen)
     }
 
+    private var itemFilter: CanvasItemFilter {
+        CanvasItemFilter(
+            query: searchText,
+            tagColors: selectedTagColors,
+            includesUntagged: includesUntaggedInFilter
+        )
+    }
+
     private var matchingItems: [FolderItem] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return items }
-        return items.filter {
-            $0.name.localizedCaseInsensitiveContains(query) ||
-            $0.tags.contains { normalizedTagName($0).localizedCaseInsensitiveContains(query) }
+        let filter = itemFilter
+        guard filter.isActive else { return items }
+        return items.filter(filter.matches)
+    }
+
+    func toggleTagFilter(_ color: FinderTagColor) {
+        if !selectedTagColors.insert(color).inserted {
+            selectedTagColors.remove(color)
         }
+        removeHiddenItemsFromSelection()
+    }
+
+    func toggleUntaggedFilter() {
+        includesUntaggedInFilter.toggle()
+        removeHiddenItemsFromSelection()
+    }
+
+    func clearFilters() {
+        searchText = ""
+        selectedTagColors = []
+        includesUntaggedInFilter = false
+        removeHiddenItemsFromSelection()
+    }
+
+    private func removeHiddenItemsFromSelection() {
+        let visibleIDs = Set(displayedItems.map(\.id))
+        selectedIDs.formIntersection(visibleIDs)
     }
 
     // MARK: - 外观、空间打开与目录扫描
@@ -262,6 +345,7 @@ final class FolderCanvasModel: ObservableObject {
         sessionLock = nil
         sessionIsReadOnly = false
         sessionLockOwner = nil
+        clearFilters()
         folderURL = standardized
         rootResourceID = persistentResourceIdentifier(for: standardized) ?? "path:\(standardized.path)"
         canvasKey = rootResourceID.map(layoutStore.canvasKey(for:))
@@ -334,6 +418,7 @@ final class FolderCanvasModel: ObservableObject {
         items = freshItems
         let currentPaths = Set(freshItems.map(\.id))
         selectedIDs.formIntersection(currentPaths)
+        removeHiddenItemsFromSelection()
 
         var changed = reconcileResourcePaths(freshItems)
         guard !layoutIsBlocked else { return }
@@ -961,9 +1046,13 @@ final class FolderCanvasModel: ObservableObject {
     func toggleTag(_ tag: String, for targetItems: [FolderItem]) {
         guard realFileMutationsAllowed(), !targetItems.isEmpty else { return }
         let normalized = normalizedTagName(tag)
+        let targetColor = FinderTagColor(finderTag: tag)
         let tagActions = targetItems.map { item -> TagAction in
             var tags = item.tags
-            if let index = tags.firstIndex(where: { normalizedTagName($0) == normalized }) {
+            if let targetColor,
+               tags.contains(where: { FinderTagColor(finderTag: $0) == targetColor }) {
+                tags.removeAll { FinderTagColor(finderTag: $0) == targetColor }
+            } else if let index = tags.firstIndex(where: { normalizedTagName($0) == normalized }) {
                 tags.remove(at: index)
             } else {
                 tags.append(tag)
@@ -1297,6 +1386,62 @@ final class FolderCanvasModel: ObservableObject {
         }
     }
 
+    /// 把桌面第一级可见文件和文件夹作为一个可撤销批次移入当前空间。
+    ///
+    /// 文件夹保持内部结构，冲突一律保留两者；图标以右下角为锚点向外寻找空位，
+    /// 已有图标只作为占用区参与计算，不会被重新排列。
+    func collectDesktopItems() {
+        guard let folderURL, !layoutIsBlocked, !folderUnavailable else { return }
+        guard realFileMutationsAllowed() else { return }
+        let destinationFolder = folderURL.standardizedFileURL
+        let desktopDirectory = desktopDirectoryURL
+        guard destinationFolder != desktopDirectory else {
+            presentStatusMessage("当前空间就是桌面，无需收纳。")
+            return
+        }
+
+        let repository = folderAccessRepository
+        startFilePreparation(title: "准备收纳桌面") {
+            let sources = try await repository.desktopCollectionSources(
+                in: desktopDirectory,
+                destinationFolder: destinationFolder
+            )
+            let plans = await repository.transferPlans(
+                sources: sources,
+                destinationFolder: destinationFolder,
+                move: true,
+                policy: .keepBoth
+            )
+            return PreparedDesktopCollection(sources: sources, plans: plans)
+        } completion: { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(prepared):
+                guard !prepared.sources.isEmpty else {
+                    self.presentStatusMessage("桌面已经很干净。")
+                    return
+                }
+                guard let record = self.beginFileOperation(
+                    kind: .moveItems,
+                    summary: "收纳桌面 \(prepared.sources.count) 个项目",
+                    itemNames: prepared.sources.map(\.lastPathComponent)
+                ) else { return }
+                self.pendingDropPoints[record.id] = CGPoint(
+                    x: max(0, self.canvasSize.width - 132),
+                    y: max(0, self.canvasSize.height - 180)
+                )
+                self.pendingDesktopCollectionIDs.insert(record.id)
+                self.startCoordinatedTransfers(
+                    recordID: record.id,
+                    title: "收纳桌面",
+                    plans: prepared.plans
+                )
+            case let .failure(error):
+                self.errorMessage = "无法读取桌面项目：\(error.localizedDescription)"
+            }
+        }
+    }
+
     /// 用户点击进度条取消按钮后只设置取消标记；协调器会在当前文件系统调用结束后安全回滚。
     func cancelCurrentFileOperation() {
         guard var progress = fileOperationProgress, progress.allowsCancellation else { return }
@@ -1539,12 +1684,20 @@ final class FolderCanvasModel: ObservableObject {
         actions: [ReversibleFileAction]
     ) {
         guard var record = operationRecords.first(where: { $0.id == recordID }) else { return }
+        let completedDesktopCollection = pendingDesktopCollectionIDs.remove(recordID) != nil
         record.actions = actions
         record.state = .applied
         record.transitionDate = Date()
         record.detail = nil
         if let dropPoint = pendingDropPoints.removeValue(forKey: recordID) {
-            applyImportedPlacement(from: actions, near: dropPoint)
+            applyImportedPlacement(
+                from: actions,
+                near: dropPoint,
+                stacksAtSinglePoint: completedDesktopCollection
+            )
+        }
+        if completedDesktopCollection {
+            captureCanvasMetadata(in: &record)
         }
         // 删除/替换动作完成后立即清除画布上的旧路径；真实文件刷新随后再确认最终状态。
         if record.kind == .trash {
@@ -1561,6 +1714,12 @@ final class FolderCanvasModel: ObservableObject {
         fileOperationTask = nil
         persist(makeBackup: true)
         refreshItems()
+        if completedDesktopCollection {
+            let movedCount = actions.reduce(into: 0) { count, action in
+                if case .relocate = action { count += 1 }
+            }
+            presentStatusMessage("已收纳 \(movedCount) 个桌面项目。")
+        }
     }
 
     private func finishCoordinatedOperation(
@@ -1576,6 +1735,7 @@ final class FolderCanvasModel: ObservableObject {
             ? "\(failure.message) 已恢复本批次完成的内容。"
             : "\(failure.message) 无法完整恢复，请在访达中核对。"
         pendingDropPoints.removeValue(forKey: recordID)
+        pendingDesktopCollectionIDs.remove(recordID)
         replaceOperationRecord(record)
         fileOperationProgress = nil
         fileOperationTask = nil
@@ -1590,6 +1750,7 @@ final class FolderCanvasModel: ObservableObject {
         record.transitionDate = Date()
         record.detail = "操作异常中断：\(unexpectedError.localizedDescription)。请在访达中核对。"
         pendingDropPoints.removeValue(forKey: recordID)
+        pendingDesktopCollectionIDs.remove(recordID)
         replaceOperationRecord(record)
         fileOperationProgress = nil
         fileOperationTask = nil
@@ -1832,14 +1993,19 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func setWallpaper(_ url: URL?) {
-        guard canEditLayout else { return }
+        guard canChangeWallpaper else { return }
+        let standardizedURL = url?.standardizedFileURL
+        guard wallpaperURL?.standardizedFileURL != standardizedURL else { return }
         captureUndoSnapshot(summary: url == nil ? "使用系统桌面壁纸" : "更换画布壁纸")
-        wallpaperURL = url
+        wallpaperURL = standardizedURL
         persist(makeBackup: true)
     }
 
     func hasTag(_ tag: String, in item: FolderItem) -> Bool {
-        item.tags.contains { normalizedTagName($0) == normalizedTagName(tag) }
+        if let color = FinderTagColor(finderTag: tag) {
+            return item.tags.contains { FinderTagColor(finderTag: $0) == color }
+        }
+        return item.tags.contains { normalizedTagName($0) == normalizedTagName(tag) }
     }
 
     func normalizedTagName(_ tag: String) -> String {
@@ -2022,7 +2188,11 @@ final class FolderCanvasModel: ObservableObject {
 
     /// 文件已经成功进入目标目录后，再把最终目标路径放到鼠标落点附近。
     /// 失败批次不会污染画布布局；已有图标由纯布局引擎作为占用区，只读不重排。
-    private func applyImportedPlacement(from actions: [ReversibleFileAction], near point: CGPoint) {
+    private func applyImportedPlacement(
+        from actions: [ReversibleFileAction],
+        near point: CGPoint,
+        stacksAtSinglePoint: Bool = false
+    ) {
         let importedPaths = actions.compactMap { action -> String? in
             switch action {
             case let .relocate(value): value.destinationPath
@@ -2034,14 +2204,26 @@ final class FolderCanvasModel: ObservableObject {
         let importedItems = importedPaths.map {
             CanvasLayoutItem(id: $0, scale: scales[$0] ?? defaultIconScale)
         }
-        let result = layoutEngine.placeImportedItems(
-            importedItems,
-            near: point,
-            existingItems: layoutItems(items),
-            positions: positions,
-            inboxIDs: inboxIDs,
-            canvasSize: canvasSize
-        )
+        let existingItems = layoutItems(items)
+        let result = if stacksAtSinglePoint {
+            layoutEngine.stackImportedItems(
+                importedItems,
+                near: point,
+                existingItems: existingItems,
+                positions: positions,
+                inboxIDs: inboxIDs,
+                canvasSize: canvasSize
+            )
+        } else {
+            layoutEngine.placeImportedItems(
+                importedItems,
+                near: point,
+                existingItems: existingItems,
+                positions: positions,
+                inboxIDs: inboxIDs,
+                canvasSize: canvasSize
+            )
+        }
         positions = result.positions
         inboxIDs = result.inboxIDs
         persist(makeBackup: true)
@@ -2051,10 +2233,20 @@ final class FolderCanvasModel: ObservableObject {
         var captured: [OperationCanvasItem] = []
         for index in record.actions.indices {
             guard let path = activePath(for: record.actions[index], state: .applied),
-                  items.contains(where: { $0.id == path }) else { continue }
+                  positions[path] != nil || inboxIDs.contains(path) else { continue }
             captured.append(canvasMetadata(for: path, actionIndex: index))
         }
         record.canvasItems = captured
+    }
+
+    private func presentStatusMessage(_ message: String) {
+        statusDismissTask?.cancel()
+        statusMessage = message
+        statusDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.statusMessage = nil
+        }
     }
 
     private func activePath(for action: ReversibleFileAction, state: OperationState) -> String? {

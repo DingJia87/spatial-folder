@@ -31,6 +31,7 @@ struct SpatialFolderSelfTests {
         run("新建事务撤销后保留内容") { try testMaterializeUndoRedo() }
         run("废纸篓事务撤销与重做") { try testDiscardUndoRedo() }
         run("Finder 标签事务撤销与重做") { try testTagUndoRedo() }
+        run("Finder 标签扫描保留颜色编号") { try testTagScanPreservesColorNumber() }
         run("恢复冲突保留两者") { try testConflictKeepBoth() }
         run("恢复冲突替换后可逆") { try testConflictReplaceRoundTrip() }
         run("多项撤销预检防止部分执行") { try testMultiActionPreflightPreventsPartialUndo() }
@@ -42,6 +43,8 @@ struct SpatialFolderSelfTests {
         await runAsync("后台批量复制逐步记录并可撤销") { try await testCoordinatedTransferRoundTrip() }
         await runAsync("后台批量失败自动回滚") { try await testCoordinatedTransferFailureRollsBack() }
         await runAsync("模型生产路径异步导入不阻塞并落账") { try await testModelAsynchronousImport() }
+        await runAsync("一键收纳桌面整体移动并在右侧中下部叠放") { try await testCollectDesktopItems() }
+        run("叠放数量和顶层项目识别") { try testPileRecognition() }
         await runAsync("短文件操作生产路径全部后台执行") { try await testBackgroundShortFileOperations() }
         await runAsync("异常恢复分析只依据磁盘证据") { try await testRecoveryAnalyzerEvidence() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
@@ -60,12 +63,16 @@ struct SpatialFolderSelfTests {
         run("70 项目进入 64+6 布局") { try testSeventyItemOverflow() }
         run("待放置区与主画布交换") { try testInboxSwap() }
         run("待放置区批量放回") { try testBatchInboxPlacement() }
+        run("顶部筛选不隐藏待放置区") { try testCanvasFiltersDoNotHideInbox() }
         run("外部拖入按落点排列且不移动已有项目") { try testDropLocationPlacement() }
         run("多选整体拖动保持相对位置") { try testGroupDragPreservesRelativeLayout() }
         run("多选批量副本和废纸篓") { try testBatchDuplicateAndTrash() }
+        run("筛选不会让隐藏选择参与批量操作") { try testFiltersExcludeHiddenSelection() }
+        run("搜索和标签筛选切换空间后清空") { try testFiltersResetWhenOpeningSpace() }
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
         run("撤销、重做和锁定") { try testUndoRedoAndLock() }
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
+        run("锁定状态仍可切换并保存壁纸") { try testWallpaperChangesWhileLocked() }
         run("跨屏往返不改写布局") { try testScreenSwitchDoesNotMutateLayout() }
         run("小屏视口统一缩放") { try testViewportScaleIsUniform() }
         run("全屏额外高度由画布背景覆盖") { try testPresentationCoversTallerViewport() }
@@ -445,6 +452,20 @@ struct SpatialFolderSelfTests {
         try check(redoneTags == ["红色"], "重做没有恢复 Finder 标签：\(redoneTags)")
     }
 
+    private static func testTagScanPreservesColorNumber() throws {
+        let base = temporaryDirectory(prefix: "TagScan")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let file = base.appendingPathComponent("tagged.txt")
+        try Data("tag".utf8).write(to: file)
+        try writeFinderTags(["自定义红色名称\n6"], to: file)
+
+        let entries = try FolderDirectoryScanner().scan(folder: base)
+        let entry = try require(entries.first, "扫描没有返回标签测试文件")
+        try check(entry.tags.first?.contains("\n6") == true, "扫描丢失 Finder 标签颜色编号：\(entry.tags)")
+        try check(FinderTagColor(finderTag: entry.tags[0]) == .red, "自定义标签没有按编号识别为红色")
+    }
+
     private static func testConflictKeepBoth() throws {
         let base = temporaryDirectory(prefix: "KeepBoth")
         defer { try? FileManager.default.removeItem(at: base) }
@@ -810,6 +831,105 @@ struct SpatialFolderSelfTests {
         let latest = try require(fixture.model.operationRecords.first, "异步导入没有操作记录")
         try check(latest.state == .applied, "异步导入记录没有落为已完成")
         try check(latest.actions.count == sources.count, "异步导入没有逐文件落账")
+    }
+
+    private static func testCollectDesktopItems() async throws {
+        let fixture = try makeFixture(
+            itemCount: 1,
+            canvasSize: CGSize(width: 1_200, height: 800),
+            fileOperationsAsynchronously: true
+        )
+        defer { fixture.cleanup() }
+        let existing = try require(fixture.model.items.first, "没有已有画布项目")
+        let existingPosition = try require(fixture.model.positions[existing.id], "已有项目没有位置")
+        try Data("desktop version".utf8).write(
+            to: fixture.desktop.appendingPathComponent(existing.name)
+        )
+        let desktopFolder = fixture.desktop.appendingPathComponent("项目资料", isDirectory: true)
+        try FileManager.default.createDirectory(at: desktopFolder, withIntermediateDirectories: true)
+        try Data("inside".utf8).write(to: desktopFolder.appendingPathComponent("内部文件.txt"))
+        try Data("hidden".utf8).write(to: fixture.desktop.appendingPathComponent(".hidden"))
+        try Data("pending".utf8).write(to: fixture.desktop.appendingPathComponent("下载中.download"))
+
+        try await waitForOperationHistory(in: fixture.model)
+        fixture.model.setLocked(true)
+        try check(fixture.model.isLocked, "测试未能预置锁定状态")
+        fixture.model.collectDesktopItems()
+        try check(fixture.model.fileOperationProgress != nil, "收纳桌面没有立即显示准备或移动进度")
+        try await waitForFileOperation(in: fixture.model)
+
+        let renamedFile = fixture.folder.appendingPathComponent("item-000 2.txt")
+        let movedFolder = fixture.folder.appendingPathComponent("项目资料", isDirectory: true)
+        try check(!FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent(existing.name).path
+        ), "桌面文件没有被移动")
+        try check(!FileManager.default.fileExists(atPath: desktopFolder.path), "桌面文件夹没有整体移动")
+        try check(FileManager.default.fileExists(atPath: renamedFile.path), "同名文件没有保留两者")
+        try check(FileManager.default.fileExists(
+            atPath: movedFolder.appendingPathComponent("内部文件.txt").path
+        ), "文件夹内部内容没有随整体移动")
+        try check(FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent(".hidden").path
+        ), "隐藏文件被错误收纳")
+        try check(FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent("下载中.download").path
+        ), "未完成下载文件被错误收纳")
+        let existingContents = try String(contentsOf: existing.url, encoding: .utf8)
+        try check(existingContents == "test-0", "保留两者时覆盖了目标中的原文件")
+        try check(fixture.model.isLocked, "收纳桌面错误解锁了画布")
+        try check(fixture.model.positions[existing.id] == existingPosition, "已有图标被收纳操作移动")
+
+        let renamedPosition = try require(
+            fixture.model.positions[renamedFile.path],
+            "\(renamedFile.lastPathComponent) 没有收纳堆位置"
+        )
+        let folderPosition = try require(
+            fixture.model.positions[movedFolder.path],
+            "\(movedFolder.lastPathComponent) 没有收纳堆位置"
+        )
+        try check(renamedPosition == folderPosition, "收纳项目没有叠放在同一点")
+        try check(
+            renamedPosition.x > fixture.model.desktopCanvasSize.width / 2 &&
+                renamedPosition.y > fixture.model.desktopCanvasSize.height / 2,
+            "收纳堆没有位于右侧中下部：\(renamedPosition)"
+        )
+        let latest = try require(
+            fixture.model.operationRecords.last { $0.summary.hasPrefix("收纳桌面") },
+            "收纳桌面没有操作记录"
+        )
+        try check(latest.summary == "收纳桌面 2 个项目", "收纳桌面摘要不正确：\(latest.summary)")
+        try check(latest.actions.count == 2, "收纳桌面没有形成一个完整批次")
+        try check(latest.canvasItems.count == 2, "收纳桌面没有记录右下角布局元数据")
+
+        fixture.model.undoLastAction()
+        try await waitForFileOperation(in: fixture.model)
+        try check(FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent(existing.name).path
+        ), "撤销没有把文件移回桌面")
+        try check(FileManager.default.fileExists(
+            atPath: desktopFolder.appendingPathComponent("内部文件.txt").path
+        ), "撤销没有把完整文件夹移回桌面")
+        try check(!FileManager.default.fileExists(atPath: renamedFile.path), "撤销后目标仍残留收纳文件")
+        try check(!FileManager.default.fileExists(atPath: movedFolder.path), "撤销后目标仍残留收纳文件夹")
+        try check(fixture.model.positions[existing.id] == existingPosition, "撤销收纳后已有图标位置变化")
+    }
+
+    private static func testPileRecognition() throws {
+        let fixture = try makeFixture(itemCount: 2)
+        defer { fixture.cleanup() }
+        let first = fixture.model.items[0]
+        let second = fixture.model.items[1]
+        let anchor = CGPoint(x: 720, y: 480)
+        fixture.model.move(first, to: anchor)
+        fixture.model.move(second, to: anchor)
+        try check(fixture.model.pileCount(for: first) == 2, "没有识别两个同点项目")
+        try check(!fixture.model.isTopOfPile(first), "错误识别了底层项目")
+        try check(fixture.model.isTopOfPile(second), "没有识别顶层项目")
+        fixture.model.select(second, extendingSelection: false)
+        fixture.model.beginDragging(second)
+        fixture.model.updateDrag(translation: CGSize(width: -120, height: -120))
+        fixture.model.finishDrag()
+        try check(fixture.model.pileCount(for: first) == 1, "拖走顶层项目后没有露出底层项目")
     }
 
     private static func testBackgroundShortFileOperations() async throws {
@@ -1294,6 +1414,74 @@ struct SpatialFolderSelfTests {
         try check(fixture.model.operationRecords.last?.actions.count == 2, "批量废纸篓没有逐项记录")
     }
 
+    private static func testFiltersExcludeHiddenSelection() throws {
+        let fixture = try makeFixture(itemCount: 3)
+        defer { fixture.cleanup() }
+        let firstURL = fixture.folder.appendingPathComponent("item-000.txt")
+        let secondURL = fixture.folder.appendingPathComponent("item-001.txt")
+        try writeFinderTags(["自定义红色\n6"], to: firstURL)
+        try writeFinderTags(["自定义绿色\n2"], to: secondURL)
+        fixture.model.refreshItems()
+
+        let first = try require(
+            fixture.model.items.first { $0.name == "item-000.txt" },
+            "缺少红色测试项目，当前：\(fixture.model.items.map(\.name))"
+        )
+        let second = try require(
+            fixture.model.items.first { $0.name == "item-001.txt" },
+            "缺少绿色测试项目，当前：\(fixture.model.items.map(\.name))"
+        )
+        let third = try require(fixture.model.items.first { $0.id != first.id && $0.id != second.id }, "缺少无标签测试项目")
+        let positionsBefore = fixture.model.positions
+
+        fixture.model.select(first, extendingSelection: false)
+        fixture.model.select(second, extendingSelection: true)
+        fixture.model.select(third, extendingSelection: true)
+        fixture.model.toggleTagFilter(.red)
+        try check(fixture.model.displayedItems.map(\.id) == [first.id], "红色筛选结果不正确")
+        try check(fixture.model.selectedIDs == [first.id], "标签筛选后仍保留隐藏项目选择")
+        try check(fixture.model.contextItems(for: first).map(\.id) == [first.id], "批量菜单仍包含隐藏选择")
+
+        fixture.model.toggleTagFilter(.green)
+        try check(Set(fixture.model.displayedItems.map(\.id)) == [first.id, second.id], "多颜色筛选没有使用 OR")
+        fixture.model.searchText = second.name
+        try check(fixture.model.displayedItems.map(\.id) == [second.id], "搜索与标签筛选没有使用 AND")
+
+        fixture.model.clearFilters()
+        fixture.model.toggleUntaggedFilter()
+        try check(fixture.model.displayedItems.map(\.id) == [third.id], "无标签筛选结果不正确")
+        try check(fixture.model.positions == positionsBefore, "切换筛选改变了画布位置")
+    }
+
+    private static func testFiltersResetWhenOpeningSpace() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        fixture.model.searchText = "不会匹配"
+        fixture.model.toggleTagFilter(.red)
+        fixture.model.toggleUntaggedFilter()
+        try check(fixture.model.hasActiveFilters, "测试没有建立筛选状态")
+
+        fixture.model.open(folder: fixture.folder)
+
+        try check(fixture.model.searchText.isEmpty, "切换空间后搜索没有清空")
+        try check(fixture.model.selectedTagColors.isEmpty, "切换空间后颜色筛选没有清空")
+        try check(!fixture.model.includesUntaggedInFilter, "切换空间后无标签筛选没有清空")
+        try check(fixture.model.displayedItems.count == 1, "切换空间后项目仍被旧筛选隐藏")
+    }
+
+    private static func testCanvasFiltersDoNotHideInbox() throws {
+        let fixture = try makeFixture(itemCount: 70)
+        defer { fixture.cleanup() }
+        let inboxBefore = fixture.model.inboxItems.map(\.id)
+        try check(inboxBefore.count == 6, "测试没有建立待放置区")
+
+        fixture.model.searchText = "不会匹配任何项目"
+        fixture.model.toggleTagFilter(.red)
+
+        try check(fixture.model.displayedItems.isEmpty, "主画布筛选没有生效")
+        try check(fixture.model.inboxItems.map(\.id) == inboxBefore, "顶部筛选隐藏了待放置区项目")
+    }
+
     private static func testExternalRenameKeepsPosition() throws {
         let fixture = try makeFixture(itemCount: 1)
         defer { fixture.cleanup() }
@@ -1346,6 +1534,58 @@ struct SpatialFolderSelfTests {
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.isLocked, "重新打开文件夹后锁定状态丢失")
+    }
+
+    private static func testWallpaperChangesWhileLocked() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let customWallpaper = fixture.base.appendingPathComponent("custom-wallpaper.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: customWallpaper)
+
+        fixture.model.setLocked(true)
+        try check(!fixture.model.canEditLayout, "锁定后仍允许编辑布局")
+        try check(fixture.model.canChangeWallpaper, "锁定错误阻止壁纸修改")
+        fixture.model.setWallpaper(customWallpaper)
+        try check(
+            fixture.model.wallpaperURL == customWallpaper.standardizedFileURL,
+            "锁定状态未能设置自定义壁纸"
+        )
+
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockingEnabled: false,
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
+        )
+        reopened.open(folder: fixture.folder)
+        try check(reopened.isLocked, "重新打开后锁定状态丢失")
+        try check(
+            reopened.wallpaperURL == customWallpaper.standardizedFileURL,
+            "重新打开后自定义壁纸丢失"
+        )
+        reopened.setWallpaper(nil)
+        try check(reopened.wallpaperURL == nil, "锁定状态未能恢复系统桌面壁纸")
+
+        let reopenedAgain = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockingEnabled: false,
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
+        )
+        reopenedAgain.open(folder: fixture.folder)
+        try check(reopenedAgain.wallpaperURL == nil, "系统桌面壁纸选择未持久保存")
     }
 
     private static func testScreenSwitchDoesNotMutateLayout() throws {
@@ -1640,8 +1880,10 @@ struct SpatialFolderSelfTests {
     ) throws -> ModelFixture {
         let base = temporaryDirectory(prefix: "Model")
         let folder = base.appendingPathComponent("Root", isDirectory: true)
+        let desktop = base.appendingPathComponent("Desktop", isDirectory: true)
         let layouts = base.appendingPathComponent("Layouts", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: desktop, withIntermediateDirectories: true)
         for index in 0..<itemCount {
             let name = String(format: "item-%03d.txt", index)
             try Data("test-\(index)".utf8).write(to: folder.appendingPathComponent(name))
@@ -1665,12 +1907,14 @@ struct SpatialFolderSelfTests {
             sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
             sessionLockingEnabled: false,
             scansAsynchronously: false,
-            fileOperationsAsynchronously: fileOperationsAsynchronously
+            fileOperationsAsynchronously: fileOperationsAsynchronously,
+            desktopDirectoryURL: desktop
         )
         model.open(folder: folder)
         return ModelFixture(
             base: base,
             folder: folder,
+            desktop: desktop,
             store: store,
             operationStore: operationStore,
             fileOperationEngine: fileOperationEngine,
@@ -1691,6 +1935,7 @@ struct SpatialFolderSelfTests {
 private struct ModelFixture {
     let base: URL
     let folder: URL
+    let desktop: URL
     let store: CanvasLayoutStore
     let operationStore: OperationHistoryStore
     let fileOperationEngine: FileOperationEngine

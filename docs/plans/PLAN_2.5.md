@@ -59,10 +59,10 @@ FolderCanvasModel（只保留可观察状态和 UI 编排）
 | R1 | `OperationJournalStore.swift` 实现 upsert/replaceAll JSONL 事件；1,000 次 upsert 回归通过 |
 | R2 | 旧 `<key>.json` 迁移为快照并归档为 `.2.4.json`；重放和压缩测试通过 |
 | R3 | actor 串行写入，真实文件操作前通过 `persistOperationRecordNow` 等待 pending 落盘 |
-| R4 | 已拆出 `CanvasLayoutEngine`、`OperationJournalStore`、`FolderAccessRepository`、`RecoveryAnalyzer`；边界见 `MAINTENANCE_2.5.md` |
+| R4 | 已拆出 `CanvasLayoutEngine`、`OperationJournalStore`、`FolderAccessRepository`、`RecoveryAnalyzer`；边界见 `../maintenance/MAINTENANCE_2.5.md` |
 | R5 | 生产路径的标签、创建、模板复制、重命名和属性读取均进入 actor；后台短操作回归通过 |
 | R6 | `CanvasFileDropDelegate` 传递逻辑投放坐标，布局引擎完成吸附/避让/溢出；已有坐标不变测试通过 |
 | R7 | 恢复向导展示逐项证据；批量动作覆盖不全、目标无证据消失和冲突位移均强制人工核对 |
 | R8 | 8/8 标准测试、63/63 完整回归通过；严格 Debug/Release 构建通过 |
-| R9 | `scripts/run_performance_baseline.zsh` 可重复执行，结果已记入 `PERFORMANCE_2.5.md` |
+| R9 | `scripts/run_performance_baseline.zsh` 可重复执行，结果已记入 `../performance/PERFORMANCE_2.5.md` |
 | R10 | 版本、README、变更记录、发布说明和维护手册已更新；2.5 App/ZIP 已完成签名、解压复验和隔离启动冒烟测试 |

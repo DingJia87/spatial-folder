@@ -115,6 +115,70 @@ struct CanvasLayoutEngine: Sendable {
         return CanvasPlacementResult(positions: resultPositions, inboxIDs: resultInbox, placedIDs: placed)
     }
 
+    /// 桌面收纳项目共用一个空网格点，像一叠卡片一样逐个拖开。
+    /// 只为整堆查找一次位置；已有项目不移动，超过主画布容量的项目仍进入待放置区。
+    func stackImportedItems(
+        _ importedItems: [CanvasLayoutItem],
+        near requestedPoint: CGPoint,
+        existingItems: [CanvasLayoutItem],
+        positions: [String: CanvasPoint],
+        inboxIDs: Set<String>,
+        canvasSize: CGSize
+    ) -> CanvasPlacementResult {
+        let importedIDs = Set(importedItems.map(\.id))
+        var resultPositions = positions.filter { !importedIDs.contains($0.key) }
+        var resultInbox = inboxIDs.subtracting(importedIDs)
+        let activeExistingItems = existingItems.filter {
+            !importedIDs.contains($0.id) && !resultInbox.contains($0.id) && resultPositions[$0.id] != nil
+        }
+        let occupied = activeExistingItems.compactMap { item -> CGRect? in
+            guard let point = resultPositions[item.id] else { return nil }
+            return iconRect(at: point, scale: item.scale)
+        }
+        let availableSlots = max(0, capacity - activeExistingItems.count)
+        let stackItems = Array(importedItems.prefix(availableSlots))
+        let overflowItems = importedItems.dropFirst(stackItems.count)
+        guard !stackItems.isEmpty else {
+            resultInbox.formUnion(importedIDs)
+            return CanvasPlacementResult(positions: resultPositions, inboxIDs: resultInbox, placedIDs: [])
+        }
+
+        let largestScale = stackItems.map(\.scale).max() ?? 1
+        let requestedAnchor = snapped(requestedPoint, scale: largestScale, canvasSize: canvasSize)
+        let requestedRect = iconRect(at: requestedAnchor, scale: largestScale).insetBy(dx: -4, dy: -4)
+        let anchor = if !occupied.contains(where: { $0.intersects(requestedRect) }) {
+            requestedAnchor
+        } else {
+            (0..<capacity)
+                .map { gridPoint(for: $0, scale: largestScale, canvasSize: canvasSize) }
+                .sorted { lhs, rhs in
+                    let leftDistance = squaredDistance(lhs, requestedPoint)
+                    let rightDistance = squaredDistance(rhs, requestedPoint)
+                    if leftDistance != rightDistance { return leftDistance < rightDistance }
+                    if lhs.y != rhs.y { return lhs.y < rhs.y }
+                    return lhs.x < rhs.x
+                }
+                .first { candidate in
+                    let rect = iconRect(at: candidate, scale: largestScale).insetBy(dx: -4, dy: -4)
+                    return !occupied.contains(where: { $0.intersects(rect) })
+                }
+        }
+
+        guard let anchor else {
+            resultInbox.formUnion(importedIDs)
+            return CanvasPlacementResult(positions: resultPositions, inboxIDs: resultInbox, placedIDs: [])
+        }
+        for item in stackItems {
+            resultPositions[item.id] = anchor
+        }
+        resultInbox.formUnion(overflowItems.map(\.id))
+        return CanvasPlacementResult(
+            positions: resultPositions,
+            inboxIDs: resultInbox,
+            placedIDs: stackItems.map(\.id)
+        )
+    }
+
     func snapped(_ point: CGPoint, scale: CGFloat, canvasSize: CGSize) -> CanvasPoint {
         let halfWidth = max(grid, 52 * scale)
         let halfHeight = max(grid, 48 * scale)

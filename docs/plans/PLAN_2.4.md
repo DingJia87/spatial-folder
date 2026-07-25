@@ -71,6 +71,6 @@
 | R7 | 完成 | 统一吸附/限位位移 + 相对位置与边界测试 |
 | R8 | 完成 | 可搜索、多选、批量放回的 `InboxPanelView` + GUI 验证 |
 | R9 | 完成 | 6 项 `swift test`、56 项完整回归、GitHub Actions 严格 Release 构建 |
-| R10 | 完成 | 新模块中文注释、主模型职责分区、`MAINTENANCE_2.4.md` |
+| R10 | 完成 | 新模块中文注释、主模型职责分区、`../maintenance/MAINTENANCE_2.4.md` |
 
 最终验证已覆盖：严格 Debug/Release 编译、App 本地签名、ZIP 解压后签名、70 项 64+6 布局、反向框选、多选右键、批量副本与撤销、普通窗口、最大化和系统全屏。GUI 使用隔离测试目录，结束后恢复原工作空间并清理测试数据。

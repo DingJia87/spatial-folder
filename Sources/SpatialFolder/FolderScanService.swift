@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// 后台扫描得到的轻量文件信息。这里故意不包含 `NSImage`，避免把 AppKit 图像跨线程传递。
@@ -30,7 +31,7 @@ struct FolderDirectoryScanner: Sendable {
             guard values?.isHidden != true else { continue }
             entries.append(ScannedFolderEntry(
                 url: url,
-                tags: values?.tagNames ?? [],
+                tags: finderTags(at: url, fallback: values?.tagNames ?? []),
                 resourceID: persistentResourceIdentifier(values)
             ))
         }
@@ -44,6 +45,26 @@ struct FolderDirectoryScanner: Sendable {
         guard let fileID = values?.fileResourceIdentifier else { return nil }
         let volumeID = values?.volumeIdentifier.map { String(describing: $0) } ?? "unknown-volume"
         return "\(volumeID)|\(String(describing: fileID))"
+    }
+
+    /// `URLResourceValues.tagNames` 只返回标签名称，会丢失 Finder 的颜色编号。
+    /// 原生扩展属性是二进制 plist；读取失败时回退到系统 API 的名称结果。
+    private func finderTags(at url: URL, fallback: [String]) -> [String] {
+        let attribute = "com.apple.metadata:_kMDItemUserTags"
+        let size = getxattr(url.path, attribute, nil, 0, 0, 0)
+        guard size > 0 else { return fallback }
+
+        var bytes = [UInt8](repeating: 0, count: size)
+        let readCount = bytes.withUnsafeMutableBytes { buffer in
+            getxattr(url.path, attribute, buffer.baseAddress, size, 0, 0)
+        }
+        guard readCount == size,
+              let tags = try? PropertyListSerialization.propertyList(
+                from: Data(bytes),
+                options: [],
+                format: nil
+              ) as? [String] else { return fallback }
+        return tags
     }
 }
 

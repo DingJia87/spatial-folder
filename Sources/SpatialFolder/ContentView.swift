@@ -99,95 +99,67 @@ struct ContentView: View {
             if let progress = model.fileOperationProgress {
                 fileOperationProgressView(progress)
                     .padding(.bottom, 14)
+            } else if let message = model.statusMessage {
+                Text(message)
+                    .font(.callout.weight(.semibold))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(radius: 6)
+                    .padding(.bottom, 14)
             }
         }
     }
 
     private var toolbar: some View {
-        HStack(spacing: 12) {
-            Button(action: model.chooseFolder) { Label("选择文件夹", systemImage: "folder") }
-                .disabled(model.isFileOperationInProgress)
-            if let folder = model.folderURL {
-                Text(folder.lastPathComponent)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 150, alignment: .leading)
-                Menu {
-                    ForEach(model.recentFolders, id: \.path) { recent in
-                        Button(recent.lastPathComponent) { model.open(folder: recent) }
-                            .help(recent.path)
-                    }
-                } label: { Label("最近空间", systemImage: "clock.arrow.circlepath") }
-                .disabled(model.recentFolders.isEmpty || model.isFileOperationInProgress)
-                Spacer()
+        HStack(spacing: 10) {
+            spacePickerMenu
+            if model.folderURL != nil {
+                Spacer(minLength: 12)
                 TextField("筛选当前空间", text: $model.searchText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
-                Button(action: model.createFolder) { Label("新建文件夹", systemImage: "folder.badge.plus") }
-                    .disabled(model.sessionIsReadOnly || model.isFileOperationInProgress || model.isLoadingOperationHistory)
-                Menu {
-                    Button("选择图片…", action: model.chooseWallpaper)
-                    Button("使用系统桌面壁纸") { model.setWallpaper(nil) }
-                } label: { Label("壁纸", systemImage: "photo") }
-                Menu {
-                    Button(model.isLocked ? "解锁画布" : "锁定画布", action: model.toggleLocked)
-                    Divider()
-                    Button("撤销上一步操作", action: model.undoLastAction)
-                        .disabled(!model.canUndo)
-                    Button("重做上一步操作", action: model.redoLastAction)
-                        .disabled(!model.canRedo)
-                    Button("找回越界项目", action: model.recoverOutOfBoundsItems)
-                        .disabled(model.isLocked)
-                    Button("将当前显示器设为基准画布…") {
-                        referenceCanvasConfirmationPresented = true
+                    .frame(width: 210)
+                tagFilterMenu
+                if model.operationHistoryIsBlocked {
+                    Button { historyPresented = true } label: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
                     }
-                    .disabled(model.isLocked)
-                    Divider()
-                    Button("恢复最近备份", action: model.restoreLatestBackup)
-                        .disabled(model.backupCount == 0)
-                    Button("查看布局备份（\(model.backupCount)）", action: model.revealBackups)
-                    Button("导出布局…", action: model.exportLayout)
-                    Button("导入布局…", action: model.importLayout)
-                    Divider()
-                    Button("重置当前布局", role: .destructive) { resetConfirmationPresented = true }
-                } label: {
-                    Label(model.isLocked ? "已锁定" : "布局", systemImage: model.isLocked ? "lock.fill" : "square.grid.3x3")
+                    .help("操作记录需要修复")
                 }
-                Button { historyPresented = true } label: {
-                    if model.isLoadingOperationHistory {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label("最近操作", systemImage: model.operationHistoryIsBlocked ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
-                    }
-                }
-                .disabled(model.isLoadingOperationHistory)
-                .help(model.operationHistoryIsBlocked ? "操作记录需要修复" : "查看、撤销或重做最近操作")
                 if !model.recoveryCases.isEmpty {
                     Button { model.isRecoveryWizardPresented = true } label: {
-                        Label("待恢复 \(model.recoveryCases.count)", systemImage: "cross.case.fill")
+                        Label("\(model.recoveryCases.count)", systemImage: "cross.case.fill")
                     }
                     .help("核对上次未确认完成的文件操作")
                 }
                 if !model.inboxItems.isEmpty {
                     Button { inboxPresented = true } label: {
-                        Label("待放置 \(model.inboxItems.count)", systemImage: "tray.full")
+                        Label("\(model.inboxItems.count)", systemImage: "tray.full")
                     }
                     .help("搜索、多选并放回主画布")
                 }
-                Menu {
-                    Button("跟随系统") { model.setAppearanceMode("system") }
-                    Button("浅色") { model.setAppearanceMode("light") }
-                    Button("深色") { model.setAppearanceMode("dark") }
-                } label: { Label("外观", systemImage: "circle.lefthalf.filled") }
-                Button(action: model.refreshItems) { Image(systemName: "arrow.clockwise") }
-                    .help("刷新")
-                    .overlay {
-                        if model.isRefreshing { ProgressView().controlSize(.small) }
+                Button(action: model.collectDesktopItems) {
+                    Label("收纳桌面", systemImage: "tray.and.arrow.down")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(!model.canCollectDesktopItems)
+                .help("收纳桌面到当前空间（⇧⌘D）")
+                Button(action: model.refreshItems) {
+                    if model.isRefreshing {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
                     }
-            } else { Spacer() }
+                }
+                    .help("刷新")
+                canvasMenu
+            } else {
+                Spacer()
+            }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .background(.bar)
         .background {
             GeometryReader { geometry in
@@ -197,6 +169,168 @@ struct ContentView: View {
                 )
             }
         }
+    }
+
+    private var spacePickerMenu: some View {
+        Menu {
+            Button("选择文件夹…", action: model.chooseFolder)
+                .disabled(model.isFileOperationInProgress)
+            if !model.recentFolders.isEmpty {
+                Divider()
+                Section("最近空间") {
+                    ForEach(model.recentFolders, id: \.path) { recent in
+                        Button {
+                            model.open(folder: recent)
+                        } label: {
+                            if recent.standardizedFileURL == model.folderURL?.standardizedFileURL {
+                                Label(recent.lastPathComponent, systemImage: "checkmark")
+                            } else {
+                                Text(recent.lastPathComponent)
+                            }
+                        }
+                        .disabled(model.isFileOperationInProgress)
+                        .help(recent.path)
+                    }
+                }
+            }
+        } label: {
+            Label {
+                Text(model.folderURL?.lastPathComponent ?? "选择文件夹")
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 190, alignment: .leading)
+            } icon: {
+                Image(systemName: model.isLocked ? "lock.fill" : "folder")
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .help(model.isLocked ? "当前画布已锁定；切换或选择空间" : "切换或选择空间")
+    }
+
+    private var canvasMenu: some View {
+        Menu {
+            Button(action: model.toggleLocked) {
+                Label(
+                    model.isLocked ? "解锁画布" : "锁定画布",
+                    systemImage: model.isLocked ? "lock.open" : "lock"
+                )
+            }
+            Divider()
+            Menu {
+                Button("选择图片…", action: model.chooseWallpaper)
+                Button("使用系统桌面壁纸") { model.setWallpaper(nil) }
+            } label: {
+                Label("壁纸", systemImage: "photo")
+            }
+            .disabled(!model.canChangeWallpaper)
+            Menu {
+                appearanceButton(title: "跟随系统", mode: "system")
+                appearanceButton(title: "浅色", mode: "light")
+                appearanceButton(title: "深色", mode: "dark")
+            } label: {
+                Label("外观", systemImage: "circle.lefthalf.filled")
+            }
+            Divider()
+            Button {
+                historyPresented = true
+            } label: {
+                Label(
+                    model.operationHistoryIsBlocked ? "操作记录需要修复" : "最近操作…",
+                    systemImage: model.operationHistoryIsBlocked
+                        ? "exclamationmark.triangle.fill"
+                        : "clock.arrow.circlepath"
+                )
+            }
+            .disabled(model.isLoadingOperationHistory)
+            Menu {
+                Button("撤销上一步操作", action: model.undoLastAction)
+                    .disabled(!model.canUndo)
+                Button("重做上一步操作", action: model.redoLastAction)
+                    .disabled(!model.canRedo)
+                Divider()
+                Button("找回越界项目", action: model.recoverOutOfBoundsItems)
+                    .disabled(model.isLocked)
+                Button("将当前显示器设为基准画布…") {
+                    referenceCanvasConfirmationPresented = true
+                }
+                .disabled(model.isLocked)
+                Divider()
+                Button("恢复最近备份", action: model.restoreLatestBackup)
+                    .disabled(model.backupCount == 0)
+                Button("查看布局备份（\(model.backupCount)）", action: model.revealBackups)
+                Button("导出布局…", action: model.exportLayout)
+                Button("导入布局…", action: model.importLayout)
+                Divider()
+                Button("重置当前布局", role: .destructive) {
+                    resetConfirmationPresented = true
+                }
+            } label: {
+                Label("布局维护", systemImage: "square.grid.3x3")
+            }
+        } label: {
+            Label("更多", systemImage: "ellipsis.circle")
+                .labelStyle(.iconOnly)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .help("画布、外观和布局设置")
+    }
+
+    @ViewBuilder
+    private func appearanceButton(title: String, mode: String) -> some View {
+        Button {
+            model.setAppearanceMode(mode)
+        } label: {
+            if model.appearanceMode == mode {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+    }
+
+    private var tagFilterMenu: some View {
+        Menu {
+            ForEach(FinderTagColor.displayOrder) { color in
+                Button {
+                    model.toggleTagFilter(color)
+                } label: {
+                    Label {
+                        Text(color.title)
+                    } icon: {
+                        Image(systemName: model.selectedTagColors.contains(color)
+                            ? "checkmark.circle.fill"
+                            : "circle.fill")
+                            .foregroundStyle(color.color)
+                    }
+                }
+            }
+            Divider()
+            Button {
+                model.toggleUntaggedFilter()
+            } label: {
+                if model.includesUntaggedInFilter {
+                    Label("无标签", systemImage: "checkmark")
+                } else {
+                    Text("无标签")
+                }
+            }
+            Divider()
+            Button("清除筛选", action: model.clearFilters)
+                .disabled(!model.hasActiveFilters)
+        } label: {
+            if model.activeTagFilterCount == 0 {
+                Label("标签筛选", systemImage: "tag")
+                    .labelStyle(.iconOnly)
+            } else {
+                Label(
+                    "\(model.activeTagFilterCount)",
+                    systemImage: "tag.fill"
+                )
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .help("按 Finder 标签颜色筛选；多种颜色之间为任一匹配")
     }
 
     /// 长文件操作的非阻塞进度条；取消会等待当前系统调用结束后回滚。
@@ -466,6 +600,19 @@ private struct FolderCanvasView: View {
                     .padding(12)
             }
         }
+        .overlay {
+            if model.displayedItems.isEmpty && model.hasActiveFilters {
+                ContentUnavailableView {
+                    Label("没有匹配项目", systemImage: "line.3.horizontal.decrease.circle")
+                } description: {
+                    Text("主画布中没有同时满足搜索和标签条件的项目。")
+                } actions: {
+                    Button("清除筛选", action: model.clearFilters)
+                }
+                .padding(24)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
+        }
         .onAppear(perform: updateCurrentScreenSize)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)) { notification in
             guard let window = notification.object as? NSWindow, window == NSApp.keyWindow else { return }
@@ -626,6 +773,18 @@ private struct CanvasIcon: View {
         .frame(width: 104 * scale, height: 96 * scale)
         .background(isSelected ? Color.accentColor.opacity(0.32) : .clear, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(isSelected ? Color.white.opacity(0.9) : .clear, lineWidth: 1))
+        .overlay(alignment: .topTrailing) {
+            let count = model.pileCount(for: item)
+            if count > 1, model.isTopOfPile(item) {
+                Text("\(count)")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor, in: Capsule())
+                    .accessibilityLabel("叠放 \(count) 个项目")
+            }
+        }
         .position(x: point.x + sharedOffset.width, y: point.y + sharedOffset.height)
         .onTapGesture(count: 2) { model.open(item) }
         .onTapGesture {
@@ -657,7 +816,7 @@ private struct CanvasIcon: View {
             Button("分享…") { model.share(contextItems) }
             Divider()
             Menu("标签") {
-                ForEach(FinderTag.allCases) { tag in
+                ForEach(FinderTagColor.displayOrder) { tag in
                     Button {
                         model.toggleTag(tag.encodedValue, for: contextItems)
                     } label: {
@@ -715,15 +874,7 @@ private struct CanvasIcon: View {
     }
 
     private func tagColor(_ tag: String) -> Color {
-        switch model.normalizedTagName(tag).lowercased() {
-        case "红色", "red": return Color.red
-        case "橙色", "orange": return Color.orange
-        case "黄色", "yellow": return Color.yellow
-        case "绿色", "green": return Color.green
-        case "蓝色", "blue": return Color.blue
-        case "紫色", "purple": return Color.purple
-        default: return Color.gray
-        }
+        FinderTagColor(finderTag: tag)?.color ?? .gray
     }
 }
 
@@ -813,30 +964,16 @@ private struct InboxPanelView: View {
     }
 }
 
-private enum FinderTag: CaseIterable, Identifiable {
-    case red, orange, yellow, green, blue, purple, gray
-
-    var id: String { encodedValue }
-    var title: String {
+private extension FinderTagColor {
+    var color: Color {
         switch self {
-        case .red: "红色"
-        case .orange: "橙色"
-        case .yellow: "黄色"
-        case .green: "绿色"
-        case .blue: "蓝色"
-        case .purple: "紫色"
-        case .gray: "灰色"
-        }
-    }
-    var encodedValue: String {
-        switch self {
-        case .red: "红色\n6"
-        case .orange: "橙色\n7"
-        case .yellow: "黄色\n5"
-        case .green: "绿色\n2"
-        case .blue: "蓝色\n4"
-        case .purple: "紫色\n3"
-        case .gray: "灰色\n1"
+        case .red: .red
+        case .orange: .orange
+        case .yellow: .yellow
+        case .green: .green
+        case .blue: .blue
+        case .purple: .purple
+        case .gray: .gray
         }
     }
 }
