@@ -43,6 +43,7 @@ struct SpatialFolderSelfTests {
         await runAsync("后台批量复制逐步记录并可撤销") { try await testCoordinatedTransferRoundTrip() }
         await runAsync("后台批量失败自动回滚") { try await testCoordinatedTransferFailureRollsBack() }
         await runAsync("模型生产路径异步导入不阻塞并落账") { try await testModelAsynchronousImport() }
+        await runAsync("一键收纳桌面整体移动并在右下角落位") { try await testCollectDesktopItems() }
         await runAsync("短文件操作生产路径全部后台执行") { try await testBackgroundShortFileOperations() }
         await runAsync("异常恢复分析只依据磁盘证据") { try await testRecoveryAnalyzerEvidence() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
@@ -829,6 +830,84 @@ struct SpatialFolderSelfTests {
         let latest = try require(fixture.model.operationRecords.first, "异步导入没有操作记录")
         try check(latest.state == .applied, "异步导入记录没有落为已完成")
         try check(latest.actions.count == sources.count, "异步导入没有逐文件落账")
+    }
+
+    private static func testCollectDesktopItems() async throws {
+        let fixture = try makeFixture(
+            itemCount: 1,
+            canvasSize: CGSize(width: 1_200, height: 800),
+            fileOperationsAsynchronously: true
+        )
+        defer { fixture.cleanup() }
+        let existing = try require(fixture.model.items.first, "没有已有画布项目")
+        let existingPosition = try require(fixture.model.positions[existing.id], "已有项目没有位置")
+        try Data("desktop version".utf8).write(
+            to: fixture.desktop.appendingPathComponent(existing.name)
+        )
+        let desktopFolder = fixture.desktop.appendingPathComponent("项目资料", isDirectory: true)
+        try FileManager.default.createDirectory(at: desktopFolder, withIntermediateDirectories: true)
+        try Data("inside".utf8).write(to: desktopFolder.appendingPathComponent("内部文件.txt"))
+        try Data("hidden".utf8).write(to: fixture.desktop.appendingPathComponent(".hidden"))
+        try Data("pending".utf8).write(to: fixture.desktop.appendingPathComponent("下载中.download"))
+
+        try await waitForOperationHistory(in: fixture.model)
+        fixture.model.setLocked(true)
+        try check(fixture.model.isLocked, "测试未能预置锁定状态")
+        fixture.model.collectDesktopItems()
+        try check(fixture.model.fileOperationProgress != nil, "收纳桌面没有立即显示准备或移动进度")
+        try await waitForFileOperation(in: fixture.model)
+
+        let renamedFile = fixture.folder.appendingPathComponent("item-000 2.txt")
+        let movedFolder = fixture.folder.appendingPathComponent("项目资料", isDirectory: true)
+        try check(!FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent(existing.name).path
+        ), "桌面文件没有被移动")
+        try check(!FileManager.default.fileExists(atPath: desktopFolder.path), "桌面文件夹没有整体移动")
+        try check(FileManager.default.fileExists(atPath: renamedFile.path), "同名文件没有保留两者")
+        try check(FileManager.default.fileExists(
+            atPath: movedFolder.appendingPathComponent("内部文件.txt").path
+        ), "文件夹内部内容没有随整体移动")
+        try check(FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent(".hidden").path
+        ), "隐藏文件被错误收纳")
+        try check(FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent("下载中.download").path
+        ), "未完成下载文件被错误收纳")
+        let existingContents = try String(contentsOf: existing.url, encoding: .utf8)
+        try check(existingContents == "test-0", "保留两者时覆盖了目标中的原文件")
+        try check(fixture.model.isLocked, "收纳桌面错误解锁了画布")
+        try check(fixture.model.positions[existing.id] == existingPosition, "已有图标被收纳操作移动")
+
+        for importedURL in [renamedFile, movedFolder] {
+            let point = try require(
+                fixture.model.positions[importedURL.path],
+                "\(importedURL.lastPathComponent) 没有右下角位置"
+            )
+            try check(
+                point.x > fixture.model.desktopCanvasSize.width / 2 &&
+                    point.y > fixture.model.desktopCanvasSize.height / 2,
+                "\(importedURL.lastPathComponent) 没有从右下角区域落位：\(point)"
+            )
+        }
+        let latest = try require(
+            fixture.model.operationRecords.last { $0.summary.hasPrefix("收纳桌面") },
+            "收纳桌面没有操作记录"
+        )
+        try check(latest.summary == "收纳桌面 2 个项目", "收纳桌面摘要不正确：\(latest.summary)")
+        try check(latest.actions.count == 2, "收纳桌面没有形成一个完整批次")
+        try check(latest.canvasItems.count == 2, "收纳桌面没有记录右下角布局元数据")
+
+        fixture.model.undoLastAction()
+        try await waitForFileOperation(in: fixture.model)
+        try check(FileManager.default.fileExists(
+            atPath: fixture.desktop.appendingPathComponent(existing.name).path
+        ), "撤销没有把文件移回桌面")
+        try check(FileManager.default.fileExists(
+            atPath: desktopFolder.appendingPathComponent("内部文件.txt").path
+        ), "撤销没有把完整文件夹移回桌面")
+        try check(!FileManager.default.fileExists(atPath: renamedFile.path), "撤销后目标仍残留收纳文件")
+        try check(!FileManager.default.fileExists(atPath: movedFolder.path), "撤销后目标仍残留收纳文件夹")
+        try check(fixture.model.positions[existing.id] == existingPosition, "撤销收纳后已有图标位置变化")
     }
 
     private static func testBackgroundShortFileOperations() async throws {
@@ -1779,8 +1858,10 @@ struct SpatialFolderSelfTests {
     ) throws -> ModelFixture {
         let base = temporaryDirectory(prefix: "Model")
         let folder = base.appendingPathComponent("Root", isDirectory: true)
+        let desktop = base.appendingPathComponent("Desktop", isDirectory: true)
         let layouts = base.appendingPathComponent("Layouts", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: desktop, withIntermediateDirectories: true)
         for index in 0..<itemCount {
             let name = String(format: "item-%03d.txt", index)
             try Data("test-\(index)".utf8).write(to: folder.appendingPathComponent(name))
@@ -1804,12 +1885,14 @@ struct SpatialFolderSelfTests {
             sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
             sessionLockingEnabled: false,
             scansAsynchronously: false,
-            fileOperationsAsynchronously: fileOperationsAsynchronously
+            fileOperationsAsynchronously: fileOperationsAsynchronously,
+            desktopDirectoryURL: desktop
         )
         model.open(folder: folder)
         return ModelFixture(
             base: base,
             folder: folder,
+            desktop: desktop,
             store: store,
             operationStore: operationStore,
             fileOperationEngine: fileOperationEngine,
@@ -1830,6 +1913,7 @@ struct SpatialFolderSelfTests {
 private struct ModelFixture {
     let base: URL
     let folder: URL
+    let desktop: URL
     let store: CanvasLayoutStore
     let operationStore: OperationHistoryStore
     let fileOperationEngine: FileOperationEngine

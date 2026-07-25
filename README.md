@@ -81,6 +81,14 @@
 - 锁定布局只保护图标位置，不再错误阻止自定义壁纸或系统桌面壁纸切换。
 - 重复选择当前壁纸不会制造无意义的撤销记录。
 
+### 4.0 一键收纳桌面（开发候选）
+
+- 顶部“收纳桌面”按钮或 `⇧⌘D` 可把桌面第一级可见文件和文件夹整体移动到当前空间。
+- 文件夹内部内容保持原样；同名项目自动保留两者，不覆盖目标中的原文件。
+- 新图标从画布右下角开始寻找空位，已有图标不移动，空间不足时进入待放置区。
+- 隐藏项目、未完成下载以及会包含当前目标空间的桌面项目自动排除。
+- 整批移动进入最近操作记录，可以一次撤销回桌面。
+
 ### 性能、显示器与外观
 
 - 文件夹扫描、壁纸解码和长文件操作不在主线程执行。
@@ -120,7 +128,7 @@
 ./scripts/package_app.zsh
 ```
 
-3.0 包含 10 项标准 SwiftPM 测试和 68 项完整回归，GitHub Actions 会自动运行测试及严格 Release 构建。
+4.0 开发候选包含 11 项标准 SwiftPM 测试和 69 项完整回归，GitHub Actions 会自动运行测试及严格 Release 构建。
 
 - [当前项目状态与新任务交接](docs/CURRENT_STATUS.md)
 - [文档索引](docs/README.md)
@@ -135,6 +143,9 @@
 - [3.0 发布说明](docs/releases/RELEASE_NOTES_3.0.md)
 - [3.0 维护说明](docs/maintenance/MAINTENANCE_3.0.md)
 - [3.0 性能基线](docs/performance/PERFORMANCE_3.0.md)
+- [4.0 开发与验收计划](docs/plans/PLAN_4.0.md)
+- [4.0 开发候选说明](docs/releases/RELEASE_NOTES_4.0-CANDIDATE.md)
+- [4.0 维护说明](docs/maintenance/MAINTENANCE_4.0.md)
 
 ## 项目结构
 

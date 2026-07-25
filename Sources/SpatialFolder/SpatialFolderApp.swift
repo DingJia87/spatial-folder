@@ -36,6 +36,10 @@ struct SpatialFolderApp: App {
                     .keyboardShortcut("v", modifiers: .command)
             }
             CommandMenu("空间") {
+                Button("收纳桌面") { model.collectDesktopItems() }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    .disabled(!model.canCollectDesktopItems)
+                Divider()
                 Button(model.isLocked ? "解锁画布" : "锁定画布") { model.toggleLocked() }
                     .keyboardShortcut("l", modifiers: [.command, .option])
                 Button("找回越界项目") { model.recoverOutOfBoundsItems() }

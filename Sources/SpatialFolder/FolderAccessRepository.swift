@@ -8,6 +8,10 @@ struct FileInfoSnapshot: Equatable, Sendable {
 /// 短时文件系统读取与目标规划仓库。它与主模型隔离，避免 `fileExists`、属性读取和批量
 /// 目标命名随着目录规模或网络磁盘延迟而卡住 UI。
 actor FolderAccessRepository {
+    private static let incompleteDownloadExtensions: Set<String> = [
+        "crdownload", "download", "icloud", "part"
+    ]
+
     private let fileManager: FileManager
 
     init(fileManager: FileManager = .default) {
@@ -80,6 +84,40 @@ actor FolderAccessRepository {
                 move: move,
                 replacesExistingDestination: replacesExisting
             )
+        }
+    }
+
+    /// 返回桌面第一级可安全收纳的可见项目。文件夹作为整体返回，不递归拆分其内容。
+    ///
+    /// 如果目标空间位于桌面某个项目内部，该祖先项目必须排除，否则会尝试把目标移入自身。
+    func desktopCollectionSources(
+        in desktopDirectory: URL,
+        destinationFolder: URL
+    ) throws -> [URL] {
+        let desktop = desktopDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let destination = destinationFolder.standardizedFileURL.resolvingSymlinksInPath()
+        guard desktop != destination else { return [] }
+
+        let candidates = try fileManager.contentsOfDirectory(
+            at: desktop,
+            includingPropertiesForKeys: [.isHiddenKey],
+            options: [.skipsHiddenFiles]
+        )
+        return candidates.filter { candidate in
+            let source = candidate.standardizedFileURL.resolvingSymlinksInPath()
+            let values = try? source.resourceValues(forKeys: [.isHiddenKey])
+            guard values?.isHidden != true, !source.lastPathComponent.hasPrefix(".") else {
+                return false
+            }
+            guard !Self.incompleteDownloadExtensions.contains(source.pathExtension.lowercased()) else {
+                return false
+            }
+            guard source != destination else { return false }
+            let sourcePrefix = source.path.hasSuffix("/") ? source.path : source.path + "/"
+            return !destination.path.hasPrefix(sourcePrefix)
+        }
+        .sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
         }
     }
 

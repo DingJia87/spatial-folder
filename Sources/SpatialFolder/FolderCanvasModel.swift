@@ -37,6 +37,11 @@ private struct PreparedImport: Sendable {
     var plans: [FileTransferPlan]
 }
 
+private struct PreparedDesktopCollection: Sendable {
+    var sources: [URL]
+    var plans: [FileTransferPlan]
+}
+
 private struct PreparedRename: Sendable {
     var destination: URL
     var replacesExisting: Bool
@@ -74,6 +79,7 @@ final class FolderCanvasModel: ObservableObject {
     private let folderAccessRepository: FolderAccessRepository
     private let recoveryAnalyzer: RecoveryAnalyzer
     private let fileOperationsAsynchronously: Bool
+    private let desktopDirectoryURL: URL
     private let layoutEngine = CanvasLayoutEngine()
     private let iconCache = FileIconCache()
 
@@ -103,6 +109,7 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var canvasSize: CGSize
     @Published private(set) var currentDisplaySize: CGSize
     @Published var errorMessage: String?
+    @Published private(set) var statusMessage: String?
     @Published private(set) var appearanceMode: String
     @Published private(set) var recentFolders: [URL] = []
     @Published var searchText = "" {
@@ -137,6 +144,8 @@ final class FolderCanvasModel: ObservableObject {
     private var redoStack: [LayoutHistoryEntry] = []
     private var conflictResolution: ((ConflictChoice) -> Void)?
     private var pendingDropPoints: [UUID: CGPoint] = [:]
+    private var pendingDesktopCollectionIDs: Set<UUID> = []
+    private var statusDismissTask: Task<Void, Never>?
     /// 持有对象即代表当前进程拥有这张画布的唯一写入权。
     private var sessionLock: CanvasSessionLock?
 
@@ -152,7 +161,8 @@ final class FolderCanvasModel: ObservableObject {
         sessionLockingEnabled: Bool = true,
         directoryScanner: FolderDirectoryScanner = FolderDirectoryScanner(),
         scansAsynchronously: Bool = true,
-        fileOperationsAsynchronously: Bool = true
+        fileOperationsAsynchronously: Bool = true,
+        desktopDirectoryURL: URL? = nil
     ) {
         self.layoutStore = layoutStore
         self.operationStore = operationStore
@@ -170,6 +180,11 @@ final class FolderCanvasModel: ObservableObject {
         folderAccessRepository = FolderAccessRepository(fileManager: fileOperationEngine.fileManager)
         recoveryAnalyzer = RecoveryAnalyzer(fileManager: fileOperationEngine.fileManager)
         self.fileOperationsAsynchronously = fileOperationsAsynchronously
+        self.desktopDirectoryURL = (
+            desktopDirectoryURL
+                ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+        ).standardizedFileURL
         let startingSize = initialCanvasSize ?? NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
         canvasSize = startingSize
         currentDisplaySize = startingSize
@@ -225,6 +240,14 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     var isFileOperationInProgress: Bool { fileOperationProgress != nil }
+
+    var canCollectDesktopItems: Bool {
+        guard let folderURL else { return false }
+        return folderURL.standardizedFileURL != desktopDirectoryURL &&
+            !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly &&
+            !isLoadingOperationHistory && !operationHistoryIsBlocked &&
+            !isFileOperationInProgress
+    }
 
     func icon(for item: FolderItem) -> NSImage {
         iconCache.icon(for: item.url)
@@ -1351,6 +1374,62 @@ final class FolderCanvasModel: ObservableObject {
         }
     }
 
+    /// 把桌面第一级可见文件和文件夹作为一个可撤销批次移入当前空间。
+    ///
+    /// 文件夹保持内部结构，冲突一律保留两者；图标以右下角为锚点向外寻找空位，
+    /// 已有图标只作为占用区参与计算，不会被重新排列。
+    func collectDesktopItems() {
+        guard let folderURL, !layoutIsBlocked, !folderUnavailable else { return }
+        guard realFileMutationsAllowed() else { return }
+        let destinationFolder = folderURL.standardizedFileURL
+        let desktopDirectory = desktopDirectoryURL
+        guard destinationFolder != desktopDirectory else {
+            presentStatusMessage("当前空间就是桌面，无需收纳。")
+            return
+        }
+
+        let repository = folderAccessRepository
+        startFilePreparation(title: "准备收纳桌面") {
+            let sources = try await repository.desktopCollectionSources(
+                in: desktopDirectory,
+                destinationFolder: destinationFolder
+            )
+            let plans = await repository.transferPlans(
+                sources: sources,
+                destinationFolder: destinationFolder,
+                move: true,
+                policy: .keepBoth
+            )
+            return PreparedDesktopCollection(sources: sources, plans: plans)
+        } completion: { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(prepared):
+                guard !prepared.sources.isEmpty else {
+                    self.presentStatusMessage("桌面已经很干净。")
+                    return
+                }
+                guard let record = self.beginFileOperation(
+                    kind: .moveItems,
+                    summary: "收纳桌面 \(prepared.sources.count) 个项目",
+                    itemNames: prepared.sources.map(\.lastPathComponent)
+                ) else { return }
+                self.pendingDropPoints[record.id] = CGPoint(
+                    x: max(0, self.canvasSize.width - 72),
+                    y: max(0, self.canvasSize.height - 72)
+                )
+                self.pendingDesktopCollectionIDs.insert(record.id)
+                self.startCoordinatedTransfers(
+                    recordID: record.id,
+                    title: "收纳桌面",
+                    plans: prepared.plans
+                )
+            case let .failure(error):
+                self.errorMessage = "无法读取桌面项目：\(error.localizedDescription)"
+            }
+        }
+    }
+
     /// 用户点击进度条取消按钮后只设置取消标记；协调器会在当前文件系统调用结束后安全回滚。
     func cancelCurrentFileOperation() {
         guard var progress = fileOperationProgress, progress.allowsCancellation else { return }
@@ -1593,12 +1672,16 @@ final class FolderCanvasModel: ObservableObject {
         actions: [ReversibleFileAction]
     ) {
         guard var record = operationRecords.first(where: { $0.id == recordID }) else { return }
+        let completedDesktopCollection = pendingDesktopCollectionIDs.remove(recordID) != nil
         record.actions = actions
         record.state = .applied
         record.transitionDate = Date()
         record.detail = nil
         if let dropPoint = pendingDropPoints.removeValue(forKey: recordID) {
             applyImportedPlacement(from: actions, near: dropPoint)
+        }
+        if completedDesktopCollection {
+            captureCanvasMetadata(in: &record)
         }
         // 删除/替换动作完成后立即清除画布上的旧路径；真实文件刷新随后再确认最终状态。
         if record.kind == .trash {
@@ -1615,6 +1698,12 @@ final class FolderCanvasModel: ObservableObject {
         fileOperationTask = nil
         persist(makeBackup: true)
         refreshItems()
+        if completedDesktopCollection {
+            let movedCount = actions.reduce(into: 0) { count, action in
+                if case .relocate = action { count += 1 }
+            }
+            presentStatusMessage("已收纳 \(movedCount) 个桌面项目。")
+        }
     }
 
     private func finishCoordinatedOperation(
@@ -1630,6 +1719,7 @@ final class FolderCanvasModel: ObservableObject {
             ? "\(failure.message) 已恢复本批次完成的内容。"
             : "\(failure.message) 无法完整恢复，请在访达中核对。"
         pendingDropPoints.removeValue(forKey: recordID)
+        pendingDesktopCollectionIDs.remove(recordID)
         replaceOperationRecord(record)
         fileOperationProgress = nil
         fileOperationTask = nil
@@ -1644,6 +1734,7 @@ final class FolderCanvasModel: ObservableObject {
         record.transitionDate = Date()
         record.detail = "操作异常中断：\(unexpectedError.localizedDescription)。请在访达中核对。"
         pendingDropPoints.removeValue(forKey: recordID)
+        pendingDesktopCollectionIDs.remove(recordID)
         replaceOperationRecord(record)
         fileOperationProgress = nil
         fileOperationTask = nil
@@ -2110,10 +2201,20 @@ final class FolderCanvasModel: ObservableObject {
         var captured: [OperationCanvasItem] = []
         for index in record.actions.indices {
             guard let path = activePath(for: record.actions[index], state: .applied),
-                  items.contains(where: { $0.id == path }) else { continue }
+                  positions[path] != nil || inboxIDs.contains(path) else { continue }
             captured.append(canvasMetadata(for: path, actionIndex: index))
         }
         record.canvasItems = captured
+    }
+
+    private func presentStatusMessage(_ message: String) {
+        statusDismissTask?.cancel()
+        statusMessage = message
+        statusDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.statusMessage = nil
+        }
     }
 
     private func activePath(for action: ReversibleFileAction, state: OperationState) -> String? {

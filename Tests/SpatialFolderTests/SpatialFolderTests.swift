@@ -2,8 +2,30 @@ import Foundation
 import Testing
 @testable import SpatialFolder
 
-@Suite("空间文件夹 3.0 核心回归")
+@Suite("空间文件夹 4.0 核心回归")
 struct SpatialFolderTests {
+    @Test("桌面收纳筛选保留文件夹并排除危险项目")
+    func testDesktopCollectionSourceFiltering() async throws {
+        let root = temporaryDirectory("DesktopCollection")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let desktop = root.appendingPathComponent("Desktop", isDirectory: true)
+        let targetContainer = desktop.appendingPathComponent("目标容器", isDirectory: true)
+        let destination = targetContainer.appendingPathComponent("当前空间", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data("report".utf8).write(to: desktop.appendingPathComponent("报告.txt"))
+        let project = desktop.appendingPathComponent("项目资料", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try Data("inside".utf8).write(to: project.appendingPathComponent("内部.txt"))
+        try Data("hidden".utf8).write(to: desktop.appendingPathComponent(".hidden"))
+        try Data("pending".utf8).write(to: desktop.appendingPathComponent("下载中.crdownload"))
+
+        let sources = try await FolderAccessRepository().desktopCollectionSources(
+            in: desktop,
+            destinationFolder: destination
+        )
+        #expect(sources.map(\.lastPathComponent) == ["报告.txt", "项目资料"])
+    }
+
     @Test("Finder 标签颜色按编号识别")
     func testFinderTagColorUsesEncodedNumber() {
         #expect(FinderTagColor(finderTag: "紧急\n6") == .red)

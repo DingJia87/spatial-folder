@@ -99,6 +99,14 @@ struct ContentView: View {
             if let progress = model.fileOperationProgress {
                 fileOperationProgressView(progress)
                     .padding(.bottom, 14)
+            } else if let message = model.statusMessage {
+                Text(message)
+                    .font(.callout.weight(.semibold))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(radius: 6)
+                    .padding(.bottom, 14)
             }
         }
     }
@@ -131,6 +139,12 @@ struct ContentView: View {
                     }
                     .help("搜索、多选并放回主画布")
                 }
+                Button(action: model.collectDesktopItems) {
+                    Label("收纳桌面", systemImage: "tray.and.arrow.down")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(!model.canCollectDesktopItems)
+                .help("收纳桌面到当前空间（⇧⌘D）")
                 Button(action: model.refreshItems) {
                     if model.isRefreshing {
                         ProgressView().controlSize(.small)

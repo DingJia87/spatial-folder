@@ -18,6 +18,12 @@
 - `maintenance/MAINTENANCE_3.0.md`：布局锁定与外观设置的权限边界及工具栏状态规则。
 - `performance/PERFORMANCE_3.0.md`：3.0 正式冻结时的扫描和日志性能复验。
 
+## 4.0 开发候选
+
+- `plans/PLAN_4.0.md`：一键收纳桌面的范围、安全边界和验收标准。
+- `releases/RELEASE_NOTES_4.0-CANDIDATE.md`：4.0 开发候选的用户可见变化与体验重点。
+- `maintenance/MAINTENANCE_4.0.md`：桌面来源筛选、批量事务和右下角落位不变量。
+
 ## 2.6 文档
 
 - `plans/PLAN_2.6.md`：标签筛选与隐藏选择安全修复的范围、规则和验收证据。
@@ -40,4 +46,4 @@
 
 ## 本地发布物
 
-`Release/3.0.0/` 保留当前正式 App 和压缩包，`Release/2.6.0/` 保留上一冻结基线；用户可见的开发候选也统一放入 `Release/<版本>/` 并在名称中标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
+`Release/3.0.0/` 保留当前正式 App 和压缩包，`Release/4.0.0/` 保存待用户验证的 4.0 开发候选；开发候选名称必须标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
