@@ -249,6 +249,18 @@ final class FolderCanvasModel: ObservableObject {
             !isFileOperationInProgress
     }
 
+    func pileCount(for item: FolderItem) -> Int {
+        guard let point = positions[item.id] else { return 0 }
+        return displayedItems.reduce(into: 0) { count, candidate in
+            if positions[candidate.id] == point { count += 1 }
+        }
+    }
+
+    func isTopOfPile(_ item: FolderItem) -> Bool {
+        guard let point = positions[item.id] else { return false }
+        return displayedItems.last { positions[$0.id] == point }?.id == item.id
+    }
+
     func icon(for item: FolderItem) -> NSImage {
         iconCache.icon(for: item.url)
     }
@@ -1415,8 +1427,8 @@ final class FolderCanvasModel: ObservableObject {
                     itemNames: prepared.sources.map(\.lastPathComponent)
                 ) else { return }
                 self.pendingDropPoints[record.id] = CGPoint(
-                    x: max(0, self.canvasSize.width - 72),
-                    y: max(0, self.canvasSize.height - 72)
+                    x: max(0, self.canvasSize.width - 132),
+                    y: max(0, self.canvasSize.height - 180)
                 )
                 self.pendingDesktopCollectionIDs.insert(record.id)
                 self.startCoordinatedTransfers(
@@ -1678,7 +1690,11 @@ final class FolderCanvasModel: ObservableObject {
         record.transitionDate = Date()
         record.detail = nil
         if let dropPoint = pendingDropPoints.removeValue(forKey: recordID) {
-            applyImportedPlacement(from: actions, near: dropPoint)
+            applyImportedPlacement(
+                from: actions,
+                near: dropPoint,
+                stacksAtSinglePoint: completedDesktopCollection
+            )
         }
         if completedDesktopCollection {
             captureCanvasMetadata(in: &record)
@@ -2172,7 +2188,11 @@ final class FolderCanvasModel: ObservableObject {
 
     /// 文件已经成功进入目标目录后，再把最终目标路径放到鼠标落点附近。
     /// 失败批次不会污染画布布局；已有图标由纯布局引擎作为占用区，只读不重排。
-    private func applyImportedPlacement(from actions: [ReversibleFileAction], near point: CGPoint) {
+    private func applyImportedPlacement(
+        from actions: [ReversibleFileAction],
+        near point: CGPoint,
+        stacksAtSinglePoint: Bool = false
+    ) {
         let importedPaths = actions.compactMap { action -> String? in
             switch action {
             case let .relocate(value): value.destinationPath
@@ -2184,14 +2204,26 @@ final class FolderCanvasModel: ObservableObject {
         let importedItems = importedPaths.map {
             CanvasLayoutItem(id: $0, scale: scales[$0] ?? defaultIconScale)
         }
-        let result = layoutEngine.placeImportedItems(
-            importedItems,
-            near: point,
-            existingItems: layoutItems(items),
-            positions: positions,
-            inboxIDs: inboxIDs,
-            canvasSize: canvasSize
-        )
+        let existingItems = layoutItems(items)
+        let result = if stacksAtSinglePoint {
+            layoutEngine.stackImportedItems(
+                importedItems,
+                near: point,
+                existingItems: existingItems,
+                positions: positions,
+                inboxIDs: inboxIDs,
+                canvasSize: canvasSize
+            )
+        } else {
+            layoutEngine.placeImportedItems(
+                importedItems,
+                near: point,
+                existingItems: existingItems,
+                positions: positions,
+                inboxIDs: inboxIDs,
+                canvasSize: canvasSize
+            )
+        }
         positions = result.positions
         inboxIDs = result.inboxIDs
         persist(makeBackup: true)

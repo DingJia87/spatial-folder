@@ -11,18 +11,18 @@
 - `performance/`：可重复执行的性能基线与结果。
 - `technical/`：早期版本的技术说明。
 
-## 当前 3.0 文档
+## 当前 4.0 文档
+
+- `plans/PLAN_4.0.md`：一键收纳桌面的范围、安全边界和验收记录。
+- `releases/RELEASE_NOTES_4.0.md`：4.0 用户可见变化、安装位置和使用方式。
+- `maintenance/MAINTENANCE_4.0.md`：桌面来源筛选、批量事务和单点堆叠不变量。
+
+## 3.0 文档
 
 - `plans/PLAN_3.0.md`：工具栏收敛、壁纸权限修复和正式验收范围。
 - `releases/RELEASE_NOTES_3.0.md`：3.0 用户可见变化、兼容边界和安装位置。
 - `maintenance/MAINTENANCE_3.0.md`：布局锁定与外观设置的权限边界及工具栏状态规则。
 - `performance/PERFORMANCE_3.0.md`：3.0 正式冻结时的扫描和日志性能复验。
-
-## 4.0 开发候选
-
-- `plans/PLAN_4.0.md`：一键收纳桌面的范围、安全边界和验收标准。
-- `releases/RELEASE_NOTES_4.0-CANDIDATE.md`：4.0 开发候选的用户可见变化与体验重点。
-- `maintenance/MAINTENANCE_4.0.md`：桌面来源筛选、批量事务和右下角落位不变量。
 
 ## 2.6 文档
 
@@ -46,4 +46,4 @@
 
 ## 本地发布物
 
-`Release/3.0.0/` 保留当前正式 App 和压缩包，`Release/4.0.0/` 保存待用户验证的 4.0 开发候选；开发候选名称必须标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
+`Release/4.0.0/` 保留当前正式 App 和压缩包，`Release/3.0.0/` 保留上一正式基线；开发候选名称必须标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。

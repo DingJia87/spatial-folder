@@ -43,7 +43,8 @@ struct SpatialFolderSelfTests {
         await runAsync("后台批量复制逐步记录并可撤销") { try await testCoordinatedTransferRoundTrip() }
         await runAsync("后台批量失败自动回滚") { try await testCoordinatedTransferFailureRollsBack() }
         await runAsync("模型生产路径异步导入不阻塞并落账") { try await testModelAsynchronousImport() }
-        await runAsync("一键收纳桌面整体移动并在右下角落位") { try await testCollectDesktopItems() }
+        await runAsync("一键收纳桌面整体移动并在右侧中下部叠放") { try await testCollectDesktopItems() }
+        run("叠放数量和顶层项目识别") { try testPileRecognition() }
         await runAsync("短文件操作生产路径全部后台执行") { try await testBackgroundShortFileOperations() }
         await runAsync("异常恢复分析只依据磁盘证据") { try await testRecoveryAnalyzerEvidence() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
@@ -878,17 +879,20 @@ struct SpatialFolderSelfTests {
         try check(fixture.model.isLocked, "收纳桌面错误解锁了画布")
         try check(fixture.model.positions[existing.id] == existingPosition, "已有图标被收纳操作移动")
 
-        for importedURL in [renamedFile, movedFolder] {
-            let point = try require(
-                fixture.model.positions[importedURL.path],
-                "\(importedURL.lastPathComponent) 没有右下角位置"
-            )
-            try check(
-                point.x > fixture.model.desktopCanvasSize.width / 2 &&
-                    point.y > fixture.model.desktopCanvasSize.height / 2,
-                "\(importedURL.lastPathComponent) 没有从右下角区域落位：\(point)"
-            )
-        }
+        let renamedPosition = try require(
+            fixture.model.positions[renamedFile.path],
+            "\(renamedFile.lastPathComponent) 没有收纳堆位置"
+        )
+        let folderPosition = try require(
+            fixture.model.positions[movedFolder.path],
+            "\(movedFolder.lastPathComponent) 没有收纳堆位置"
+        )
+        try check(renamedPosition == folderPosition, "收纳项目没有叠放在同一点")
+        try check(
+            renamedPosition.x > fixture.model.desktopCanvasSize.width / 2 &&
+                renamedPosition.y > fixture.model.desktopCanvasSize.height / 2,
+            "收纳堆没有位于右侧中下部：\(renamedPosition)"
+        )
         let latest = try require(
             fixture.model.operationRecords.last { $0.summary.hasPrefix("收纳桌面") },
             "收纳桌面没有操作记录"
@@ -908,6 +912,24 @@ struct SpatialFolderSelfTests {
         try check(!FileManager.default.fileExists(atPath: renamedFile.path), "撤销后目标仍残留收纳文件")
         try check(!FileManager.default.fileExists(atPath: movedFolder.path), "撤销后目标仍残留收纳文件夹")
         try check(fixture.model.positions[existing.id] == existingPosition, "撤销收纳后已有图标位置变化")
+    }
+
+    private static func testPileRecognition() throws {
+        let fixture = try makeFixture(itemCount: 2)
+        defer { fixture.cleanup() }
+        let first = fixture.model.items[0]
+        let second = fixture.model.items[1]
+        let anchor = CGPoint(x: 720, y: 480)
+        fixture.model.move(first, to: anchor)
+        fixture.model.move(second, to: anchor)
+        try check(fixture.model.pileCount(for: first) == 2, "没有识别两个同点项目")
+        try check(!fixture.model.isTopOfPile(first), "错误识别了底层项目")
+        try check(fixture.model.isTopOfPile(second), "没有识别顶层项目")
+        fixture.model.select(second, extendingSelection: false)
+        fixture.model.beginDragging(second)
+        fixture.model.updateDrag(translation: CGSize(width: -120, height: -120))
+        fixture.model.finishDrag()
+        try check(fixture.model.pileCount(for: first) == 1, "拖走顶层项目后没有露出底层项目")
     }
 
     private static func testBackgroundShortFileOperations() async throws {

@@ -194,6 +194,42 @@ struct SpatialFolderTests {
         #expect(result.positions["incoming"] != nil)
     }
 
+    @Test("桌面收纳项目叠放并整体避开已有图标")
+    func testDesktopCollectionStackPlacement() {
+        let engine = CanvasLayoutEngine()
+        let occupiedAnchor = CanvasPoint(x: 1_080, y: 624)
+        let before = ["existing": occupiedAnchor]
+        let imported = [
+            CanvasLayoutItem(id: "folder", scale: 1.25),
+            CanvasLayoutItem(id: "file-a", scale: 1.25),
+            CanvasLayoutItem(id: "file-b", scale: 1.25)
+        ]
+        let requestedResult = engine.stackImportedItems(
+            imported,
+            near: CGPoint(x: 1_068, y: 620),
+            existingItems: [],
+            positions: [:],
+            inboxIDs: [],
+            canvasSize: CGSize(width: 1_200, height: 800)
+        )
+        #expect(requestedResult.positions["folder"] == occupiedAnchor)
+
+        let result = engine.stackImportedItems(
+            imported,
+            near: CGPoint(x: 1_068, y: 620),
+            existingItems: [CanvasLayoutItem(id: "existing", scale: 1.25)],
+            positions: before,
+            inboxIDs: [],
+            canvasSize: CGSize(width: 1_200, height: 800)
+        )
+        #expect(result.positions["existing"] == occupiedAnchor)
+        let stackPoints = imported.compactMap { result.positions[$0.id] }
+        #expect(stackPoints.count == imported.count)
+        #expect(stackPoints.allSatisfy { $0 == stackPoints.first })
+        #expect(stackPoints.first != occupiedAnchor)
+        #expect(result.placedIDs == imported.map(\.id))
+    }
+
     @Test("普通窗口随宽度保持比例")
     func testNormalWindowKeepsAspectRatio() {
         let result = WindowAspectSizing.constrainedContentSize(

@@ -773,6 +773,18 @@ private struct CanvasIcon: View {
         .frame(width: 104 * scale, height: 96 * scale)
         .background(isSelected ? Color.accentColor.opacity(0.32) : .clear, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(isSelected ? Color.white.opacity(0.9) : .clear, lineWidth: 1))
+        .overlay(alignment: .topTrailing) {
+            let count = model.pileCount(for: item)
+            if count > 1, model.isTopOfPile(item) {
+                Text("\(count)")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor, in: Capsule())
+                    .accessibilityLabel("叠放 \(count) 个项目")
+            }
+        }
         .position(x: point.x + sharedOffset.width, y: point.y + sharedOffset.height)
         .onTapGesture(count: 2) { model.open(item) }
         .onTapGesture {
