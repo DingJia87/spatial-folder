@@ -70,8 +70,8 @@
 
 ## 五、尚未完成与下一阶段
 
-1. 将 4.0 版本分支推送到 GitHub，并更新公开 Release 下载。
-2. 在真实日常使用中继续观察 macOS 桌面访问权限、超大批次收纳和逐项拖开体验。
+1. 在真实日常使用中继续观察 macOS 桌面访问权限、超大批次收纳和逐项拖开体验。
+2. 后续版本继续从最新正式分支开发，并在用户验收后更新 GitHub 默认分支与公开 Release。
 3. 将 `codex/project-cleanup`、`codex/archive-v1.1-worktree`、`codex/archive-v2.1-worktree` 推送到 GitHub，避免归档只存在本机。
 4. 审核并把项目结构整理提交合并到远端 `main`。
 5. Apple Developer ID 签名、公证、iCloud 多设备冲突等仍未完成，具体限制见 `README.md`。

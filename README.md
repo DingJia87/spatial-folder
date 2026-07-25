@@ -10,7 +10,7 @@
 
 ## 下载和安装
 
-本地正式 App 和 ZIP 位于 `Release/4.0.0/`。GitHub Releases 公开下载在推送 4.0 前仍为 [v2.5.0](https://github.com/DingJia87/spatial-folder/releases/tag/v2.5.0)。
+本地正式 App 和 ZIP 位于 `Release/4.0.0/`，公开版本可从 [GitHub Releases v4.0.0](https://github.com/DingJia87/spatial-folder/releases/tag/v4.0.0) 下载。
 
 1. 解压后，把 `空间文件夹.app` 拖入“应用程序”。
 2. 第一次启动时，右键 App，选择“打开”。
