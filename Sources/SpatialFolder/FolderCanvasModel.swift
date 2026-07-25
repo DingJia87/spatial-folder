@@ -218,6 +218,12 @@ final class FolderCanvasModel: ObservableObject {
             !isLoadingOperationHistory && !isLocked
     }
 
+    /// 锁定只保护图标布局；壁纸属于显示偏好，锁定时仍应允许调整。
+    var canChangeWallpaper: Bool {
+        folderURL != nil && !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly &&
+            !isLoadingOperationHistory
+    }
+
     var isFileOperationInProgress: Bool { fileOperationProgress != nil }
 
     func icon(for item: FolderItem) -> NSImage {
@@ -1880,9 +1886,11 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func setWallpaper(_ url: URL?) {
-        guard canEditLayout else { return }
+        guard canChangeWallpaper else { return }
+        let standardizedURL = url?.standardizedFileURL
+        guard wallpaperURL?.standardizedFileURL != standardizedURL else { return }
         captureUndoSnapshot(summary: url == nil ? "使用系统桌面壁纸" : "更换画布壁纸")
-        wallpaperURL = url
+        wallpaperURL = standardizedURL
         persist(makeBackup: true)
     }
 

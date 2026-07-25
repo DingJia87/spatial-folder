@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SpatialFolder
 
-@Suite("空间文件夹 2.6 核心回归")
+@Suite("空间文件夹 3.0 核心回归")
 struct SpatialFolderTests {
     @Test("Finder 标签颜色按编号识别")
     func testFinderTagColorUsesEncodedNumber() {

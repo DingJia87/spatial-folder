@@ -70,6 +70,7 @@ struct SpatialFolderSelfTests {
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
         run("撤销、重做和锁定") { try testUndoRedoAndLock() }
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
+        run("锁定状态仍可切换并保存壁纸") { try testWallpaperChangesWhileLocked() }
         run("跨屏往返不改写布局") { try testScreenSwitchDoesNotMutateLayout() }
         run("小屏视口统一缩放") { try testViewportScaleIsUniform() }
         run("全屏额外高度由画布背景覆盖") { try testPresentationCoversTallerViewport() }
@@ -1432,6 +1433,58 @@ struct SpatialFolderSelfTests {
         )
         reopened.open(folder: fixture.folder)
         try check(reopened.isLocked, "重新打开文件夹后锁定状态丢失")
+    }
+
+    private static func testWallpaperChangesWhileLocked() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let customWallpaper = fixture.base.appendingPathComponent("custom-wallpaper.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: customWallpaper)
+
+        fixture.model.setLocked(true)
+        try check(!fixture.model.canEditLayout, "锁定后仍允许编辑布局")
+        try check(fixture.model.canChangeWallpaper, "锁定错误阻止壁纸修改")
+        fixture.model.setWallpaper(customWallpaper)
+        try check(
+            fixture.model.wallpaperURL == customWallpaper.standardizedFileURL,
+            "锁定状态未能设置自定义壁纸"
+        )
+
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockingEnabled: false,
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
+        )
+        reopened.open(folder: fixture.folder)
+        try check(reopened.isLocked, "重新打开后锁定状态丢失")
+        try check(
+            reopened.wallpaperURL == customWallpaper.standardizedFileURL,
+            "重新打开后自定义壁纸丢失"
+        )
+        reopened.setWallpaper(nil)
+        try check(reopened.wallpaperURL == nil, "锁定状态未能恢复系统桌面壁纸")
+
+        let reopenedAgain = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockingEnabled: false,
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
+        )
+        reopenedAgain.open(folder: fixture.folder)
+        try check(reopenedAgain.wallpaperURL == nil, "系统桌面壁纸选择未持久保存")
     }
 
     private static func testScreenSwitchDoesNotMutateLayout() throws {

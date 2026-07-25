@@ -11,12 +11,23 @@
 - `performance/`：可重复执行的性能基线与结果。
 - `technical/`：早期版本的技术说明。
 
-## 当前 2.6 文档
+## 当前 3.0 文档
+
+- `plans/PLAN_3.0.md`：工具栏收敛、壁纸权限修复和正式验收范围。
+- `releases/RELEASE_NOTES_3.0.md`：3.0 用户可见变化、兼容边界和安装位置。
+- `maintenance/MAINTENANCE_3.0.md`：布局锁定与外观设置的权限边界及工具栏状态规则。
+- `performance/PERFORMANCE_3.0.md`：3.0 正式冻结时的扫描和日志性能复验。
+
+## 2.6 文档
 
 - `plans/PLAN_2.6.md`：标签筛选与隐藏选择安全修复的范围、规则和验收证据。
 - `releases/RELEASE_NOTES_2.6.md`：2.6 用户可见变化和升级边界。
 - `maintenance/MAINTENANCE_2.6.md`：Finder 标签编码、筛选组合及选择安全不变量。
 - `performance/PERFORMANCE_2.6.md`：保留 Finder 颜色编号后的扫描性能基线。
+
+## 2.7 开发记录
+
+- `plans/PLAN_2.7.md`：顶部工具栏收敛、状态保留和开发候选验证记录；成果已并入 3.0。
 
 ## 历史源码保全
 
@@ -29,4 +40,4 @@
 
 ## 本地发布物
 
-`Release/2.6.0/` 保留当前可运行 App 和压缩包；用户可见的开发候选以后也统一放入 `Release/<版本>/` 并在名称中标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
+`Release/3.0.0/` 保留当前正式 App 和压缩包，`Release/2.6.0/` 保留上一冻结基线；用户可见的开发候选也统一放入 `Release/<版本>/` 并在名称中标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
