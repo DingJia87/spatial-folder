@@ -856,7 +856,22 @@ struct SpatialFolderSelfTests {
         fixture.model.setLocked(true)
         try check(fixture.model.isLocked, "测试未能预置锁定状态")
         fixture.model.collectDesktopItems()
-        try check(fixture.model.fileOperationProgress != nil, "收纳桌面没有立即显示准备或移动进度")
+        try check(fixture.model.fileOperationProgress != nil, "收纳桌面没有立即显示只读检查进度")
+        try await waitForFileOperation(in: fixture.model)
+        let confirmation = try require(
+            fixture.model.desktopCollectionConfirmation,
+            "桌面检查完成后没有等待用户确认"
+        )
+        try check(confirmation.totalCount == 2, "收纳确认项目总数不正确")
+        try check(confirmation.fileCount == 1, "收纳确认文件数不正确")
+        try check(confirmation.folderCount == 1, "收纳确认文件夹数不正确")
+        try check(
+            FileManager.default.fileExists(
+                atPath: fixture.desktop.appendingPathComponent(existing.name).path
+            ) && FileManager.default.fileExists(atPath: desktopFolder.path),
+            "用户确认前已经移动了真实桌面项目"
+        )
+        fixture.model.confirmDesktopCollection()
         try await waitForFileOperation(in: fixture.model)
 
         let renamedFile = fixture.folder.appendingPathComponent("item-000 2.txt")

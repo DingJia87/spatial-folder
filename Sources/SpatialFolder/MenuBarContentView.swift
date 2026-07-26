@@ -19,7 +19,10 @@ struct MenuBarContentView: View {
 
         Divider()
 
-        Button("收纳桌面", action: model.collectDesktopItems)
+        Button("收纳桌面") {
+            visibilityController.showMainWindow()
+            model.collectDesktopItems()
+        }
             .disabled(!model.canCollectDesktopItems)
 
         if !model.recentFolders.isEmpty {

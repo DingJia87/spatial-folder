@@ -54,6 +54,25 @@ private struct PreparedImport: Sendable {
 private struct PreparedDesktopCollection: Sendable {
     var sources: [URL]
     var plans: [FileTransferPlan]
+    var destinationFolder: URL
+    var fileCount: Int
+    var folderCount: Int
+}
+
+struct DesktopCollectionConfirmation: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let destinationName: String
+    let fileCount: Int
+    let folderCount: Int
+
+    var totalCount: Int { fileCount + folderCount }
+
+    var countDescription: String {
+        var parts: [String] = []
+        if fileCount > 0 { parts.append("\(fileCount) 个文件") }
+        if folderCount > 0 { parts.append("\(folderCount) 个文件夹") }
+        return parts.joined(separator: "、")
+    }
 }
 
 private struct PreparedRename: Sendable {
@@ -138,6 +157,7 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var recoveryCases: [RecoveryCase] = []
     @Published private(set) var isLoadingOperationHistory = false
     @Published var isRecoveryWizardPresented = false
+    @Published private(set) var desktopCollectionConfirmation: DesktopCollectionConfirmation?
 
     private var folderMonitor: FolderChangeMonitor?
     private var legacyFolderMonitor: DispatchSourceFileSystemObject?
@@ -163,6 +183,7 @@ final class FolderCanvasModel: ObservableObject {
     private var conflictResolution: ((ConflictChoice) -> Void)?
     private var pendingDropPoints: [UUID: CGPoint] = [:]
     private var pendingDesktopCollectionIDs: Set<UUID> = []
+    private var preparedDesktopCollection: PreparedDesktopCollection?
     private var statusDismissTask: Task<Void, Never>?
     /// 持有对象即代表当前进程拥有这张画布的唯一写入权。
     private var sessionLock: CanvasSessionLock?
@@ -264,7 +285,7 @@ final class FolderCanvasModel: ObservableObject {
         return folderURL.standardizedFileURL != desktopDirectoryURL &&
             !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly &&
             !isLoadingOperationHistory && !operationHistoryIsBlocked &&
-            !isFileOperationInProgress
+            !isFileOperationInProgress && desktopCollectionConfirmation == nil
     }
 
     func pileCount(for item: FolderItem) -> Int {
@@ -369,6 +390,7 @@ final class FolderCanvasModel: ObservableObject {
             errorMessage = "请等待当前文件操作完成，或先取消操作，再切换空间。"
             return
         }
+        cancelDesktopCollection()
         let standardized = folder.standardizedFileURL
         guard Self.directoryExists(at: standardized) else {
             errorMessage = "无法打开文件夹：文件夹不存在或暂时不可用。"
@@ -1438,10 +1460,9 @@ final class FolderCanvasModel: ObservableObject {
         }
     }
 
-    /// 把桌面第一级可见文件和文件夹作为一个可撤销批次移入当前空间。
+    /// 只读扫描桌面并生成确认信息；用户确认前不修改任何真实文件。
     ///
-    /// 文件夹保持内部结构，冲突一律保留两者；图标以右下角为锚点向外寻找空位，
-    /// 已有图标只作为占用区参与计算，不会被重新排列。
+    /// 所有入口都必须先经过这里，确认后的批量移动继续沿用原有事务和回滚机制。
     func collectDesktopItems() {
         guard let folderURL, !layoutIsBlocked, !folderUnavailable else { return }
         guard realFileMutationsAllowed() else { return }
@@ -1464,7 +1485,22 @@ final class FolderCanvasModel: ObservableObject {
                 move: true,
                 policy: .keepBoth
             )
-            return PreparedDesktopCollection(sources: sources, plans: plans)
+            var fileCount = 0
+            var folderCount = 0
+            for source in sources {
+                if (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                    folderCount += 1
+                } else {
+                    fileCount += 1
+                }
+            }
+            return PreparedDesktopCollection(
+                sources: sources,
+                plans: plans,
+                destinationFolder: destinationFolder,
+                fileCount: fileCount,
+                folderCount: folderCount
+            )
         } completion: { [weak self] result in
             guard let self else { return }
             switch result {
@@ -1473,25 +1509,52 @@ final class FolderCanvasModel: ObservableObject {
                     self.presentStatusMessage("桌面已经很干净。")
                     return
                 }
-                guard let record = self.beginFileOperation(
-                    kind: .moveItems,
-                    summary: "收纳桌面 \(prepared.sources.count) 个项目",
-                    itemNames: prepared.sources.map(\.lastPathComponent)
-                ) else { return }
-                self.pendingDropPoints[record.id] = CGPoint(
-                    x: max(0, self.canvasSize.width - 132),
-                    y: max(0, self.canvasSize.height - 180)
-                )
-                self.pendingDesktopCollectionIDs.insert(record.id)
-                self.startCoordinatedTransfers(
-                    recordID: record.id,
-                    title: "收纳桌面",
-                    plans: prepared.plans
+                self.preparedDesktopCollection = prepared
+                self.desktopCollectionConfirmation = DesktopCollectionConfirmation(
+                    id: UUID(),
+                    destinationName: prepared.destinationFolder.lastPathComponent,
+                    fileCount: prepared.fileCount,
+                    folderCount: prepared.folderCount
                 )
             case let .failure(error):
                 self.errorMessage = "无法读取桌面项目：\(error.localizedDescription)"
             }
         }
+    }
+
+    func confirmDesktopCollection() {
+        guard let prepared = preparedDesktopCollection,
+              let folderURL,
+              folderURL.standardizedFileURL == prepared.destinationFolder.standardizedFileURL
+        else {
+            cancelDesktopCollection()
+            presentStatusMessage("当前空间已经变化，请重新检查桌面项目。")
+            return
+        }
+        desktopCollectionConfirmation = nil
+        preparedDesktopCollection = nil
+        guard realFileMutationsAllowed(),
+              let record = beginFileOperation(
+                  kind: .moveItems,
+                  summary: "收纳桌面 \(prepared.sources.count) 个项目",
+                  itemNames: prepared.sources.map(\.lastPathComponent)
+              )
+        else { return }
+        pendingDropPoints[record.id] = CGPoint(
+            x: max(0, canvasSize.width - 132),
+            y: max(0, canvasSize.height - 180)
+        )
+        pendingDesktopCollectionIDs.insert(record.id)
+        startCoordinatedTransfers(
+            recordID: record.id,
+            title: "收纳桌面",
+            plans: prepared.plans
+        )
+    }
+
+    func cancelDesktopCollection() {
+        desktopCollectionConfirmation = nil
+        preparedDesktopCollection = nil
     }
 
     /// 用户点击进度条取消按钮后只设置取消标记；协调器会在当前文件系统调用结束后安全回滚。

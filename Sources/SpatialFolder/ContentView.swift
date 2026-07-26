@@ -157,6 +157,21 @@ struct ContentView: View {
                 }
                 .disabled(!model.canCollectDesktopItems)
                 .help("收纳桌面到当前空间（⇧⌘D）")
+                .popover(
+                    isPresented: Binding(
+                        get: { model.desktopCollectionConfirmation != nil },
+                        set: { if !$0 { model.cancelDesktopCollection() } }
+                    ),
+                    arrowEdge: .top
+                ) {
+                    if let confirmation = model.desktopCollectionConfirmation {
+                        DesktopCollectionConfirmationView(
+                            confirmation: confirmation,
+                            cancel: model.cancelDesktopCollection,
+                            confirm: model.confirmDesktopCollection
+                        )
+                    }
+                }
                 Button(action: model.refreshItems) {
                     if model.isRefreshing {
                         ProgressView().controlSize(.small)
@@ -720,6 +735,38 @@ private final class DroppedURLCollector: @unchecked Sendable {
 
         guard let completedURLs else { return }
         Task { @MainActor [completion] in completion(completedURLs) }
+    }
+}
+
+private struct DesktopCollectionConfirmationView: View {
+    let confirmation: DesktopCollectionConfirmation
+    let cancel: () -> Void
+    let confirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("收纳桌面", systemImage: "tray.and.arrow.down.fill")
+                .font(.headline)
+            Text("将 \(confirmation.totalCount) 个项目移动到“\(confirmation.destinationName)”")
+                .font(.callout)
+            Text(confirmation.countDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("文件夹会连同内部内容整体移动；完成后可在“最近操作”中撤销。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("取消", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("收纳", action: confirm)
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
     }
 }
 

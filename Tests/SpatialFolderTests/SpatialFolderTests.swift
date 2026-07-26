@@ -4,8 +4,20 @@ import Foundation
 import Testing
 @testable import SpatialFolder
 
-@Suite("空间文件夹 4.2 核心回归")
+@Suite("空间文件夹 4.3 核心回归")
 struct SpatialFolderTests {
+    @Test("桌面收纳确认信息区分文件和文件夹")
+    func testDesktopCollectionConfirmationSummary() {
+        let confirmation = DesktopCollectionConfirmation(
+            id: UUID(),
+            destinationName: "工作桌面",
+            fileCount: 8,
+            folderCount: 4
+        )
+        #expect(confirmation.totalCount == 12)
+        #expect(confirmation.countDescription == "8 个文件、4 个文件夹")
+    }
+
     @Test("默认全局快捷键清晰且需要安全修饰键")
     func testGlobalShortcutValidationAndDisplay() {
         #expect(GlobalShortcut.defaultToggle.displayName == "⌃⌥空格")

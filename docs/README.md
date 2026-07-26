@@ -11,6 +11,12 @@
 - `performance/`：可重复执行的性能基线与结果。
 - `technical/`：早期版本的技术说明。
 
+## 当前4.3文档
+
+- `plans/PLAN_4.3.md`：仅增加收纳前确认的范围与验收标准。
+- `releases/RELEASE_NOTES_4.3.md`：4.3用户可见变化和候选位置。
+- `maintenance/MAINTENANCE_4.3.md`：收纳准备态和真实移动的维护边界。
+
 ## 当前 4.2 文档
 
 - `plans/PLAN_4.2.md`：标签同步、文件夹着色、状态安全和正式验收范围。
@@ -60,4 +66,4 @@
 
 ## 本地发布物
 
-`Release/4.2.0/` 保留当前正式 App 和压缩包，`Release/4.1.0/` 保留上一正式基线及4.2验收前候选；开发候选名称必须标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
+`Release/4.3.0/`保留当前正式App和压缩包，`Release/4.2.0/`保留上一正式基线；开发候选名称必须标明状态。旧版只保留ZIP，集中放在`Release/archive/<版本>/`。整个`Release/`是本地构建产物，不进入Git；对外下载与长期分发以GitHub Releases为准。
