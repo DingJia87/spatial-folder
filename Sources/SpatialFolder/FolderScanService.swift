@@ -6,6 +6,7 @@ struct ScannedFolderEntry: Equatable, Sendable {
     let url: URL
     let tags: [String]
     let resourceID: String?
+    let isDirectory: Bool
 }
 
 /// 只负责读取所选文件夹的第一级内容，不接触布局和界面状态。
@@ -13,6 +14,7 @@ struct FolderDirectoryScanner: Sendable {
     func scan(folder: URL) throws -> [ScannedFolderEntry] {
         let keys: Set<URLResourceKey> = [
             .isHiddenKey,
+            .isDirectoryKey,
             .tagNamesKey,
             .fileResourceIdentifierKey,
             .volumeIdentifierKey
@@ -32,11 +34,20 @@ struct FolderDirectoryScanner: Sendable {
             entries.append(ScannedFolderEntry(
                 url: url,
                 tags: finderTags(at: url, fallback: values?.tagNames ?? []),
-                resourceID: persistentResourceIdentifier(values)
+                resourceID: persistentResourceIdentifier(values),
+                isDirectory: values?.isDirectory == true
             ))
         }
         return entries.sorted {
             $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    /// 监听能力不可用时只复核标签，不重复读取图标、布局或资源标识。
+    func scanTags(for urls: [URL]) -> [String: [String]] {
+        urls.reduce(into: [:]) { result, url in
+            let fallback = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
+            result[url.path] = finderTags(at: url, fallback: fallback)
         }
     }
 
@@ -78,5 +89,9 @@ actor FolderScanService {
 
     func scan(folder: URL) throws -> [ScannedFolderEntry] {
         try scanner.scan(folder: folder)
+    }
+
+    func scanTags(for urls: [URL]) -> [String: [String]] {
+        scanner.scanTags(for: urls)
     }
 }

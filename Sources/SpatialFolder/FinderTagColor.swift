@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Finder 标签把显示名称和颜色编号编码为“名称\n编号”。
@@ -50,6 +51,41 @@ enum FinderTagColor: Int, CaseIterable, Identifiable, Hashable, Sendable {
         case "紫色", "purple": self = .purple
         case "灰色", "gray", "grey": self = .gray
         default: return nil
+        }
+    }
+
+    func menuIcon(selected: Bool) -> NSImage {
+        let size = NSSize(width: 12, height: 12)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let circle = rect.insetBy(dx: 1, dy: 1)
+            menuColor.setFill()
+            NSBezierPath(ovalIn: circle).fill()
+            guard selected else { return true }
+
+            let check = NSBezierPath()
+            check.move(to: NSPoint(x: 3.2, y: 6.1))
+            check.line(to: NSPoint(x: 5.2, y: 4.1))
+            check.line(to: NSPoint(x: 8.9, y: 8.2))
+            check.lineWidth = 1.5
+            check.lineCapStyle = .round
+            check.lineJoinStyle = .round
+            NSColor.white.setStroke()
+            check.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    var menuColor: NSColor {
+        switch self {
+        case .red: .systemRed
+        case .orange: .systemOrange
+        case .yellow: .systemYellow
+        case .green: .systemGreen
+        case .blue: .systemBlue
+        case .purple: .systemPurple
+        case .gray: .systemGray
         }
     }
 }

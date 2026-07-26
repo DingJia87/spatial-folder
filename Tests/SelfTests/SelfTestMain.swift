@@ -87,6 +87,7 @@ struct SpatialFolderSelfTests {
         run("布局导出和导入") { try testExportImport() }
         run("根文件夹移动后恢复") { try testRootFolderMoveRecovery() }
         run("手动重新关联按文件名保留布局") { try testManualRelinkKeepsLayoutByName() }
+        run("默认全局快捷键可读且安全") { try testDefaultGlobalShortcut() }
 
         print("\n自测结果：\(passed) 通过，\(failed) 失败")
         if failed > 0 { exit(1) }
@@ -1860,6 +1861,11 @@ struct SpatialFolderSelfTests {
             fixture.model.positions[replacementItem.id] == expected,
             "重新关联后没有按文件名保留位置；期望 \(expected)，实际 \(String(describing: fixture.model.positions[replacementItem.id]))"
         )
+    }
+
+    private static func testDefaultGlobalShortcut() throws {
+        try check(GlobalShortcut.defaultToggle.displayName == "⌃⌥空格", "默认快捷键显示错误")
+        try check(GlobalShortcut.defaultToggle.isAllowed, "默认快捷键未通过安全校验")
     }
 
     private static func assertItemsInsideBounds(_ model: FolderCanvasModel) throws {

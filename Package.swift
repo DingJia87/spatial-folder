@@ -28,7 +28,14 @@ let package = Package(
         )
     ],
     targets: [
-        .executableTarget(name: "SpatialFolder", resources: [.process("Resources")]),
+        .executableTarget(
+            name: "SpatialFolder",
+            resources: [.process("Resources")],
+            linkerSettings: [
+                .linkedFramework("Carbon"),
+                .linkedFramework("CoreServices")
+            ]
+        ),
         .testTarget(
             name: "SpatialFolderTests",
             dependencies: [

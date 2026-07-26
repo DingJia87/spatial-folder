@@ -11,7 +11,21 @@
 - `performance/`：可重复执行的性能基线与结果。
 - `technical/`：早期版本的技术说明。
 
-## 当前 4.0 文档
+## 当前 4.2 文档
+
+- `plans/PLAN_4.2.md`：标签同步、文件夹着色、状态安全和正式验收范围。
+- `releases/RELEASE_NOTES_4.2.md`：4.2用户可见变化、安装位置和资源说明。
+- `maintenance/MAINTENANCE_4.2.md`：标签监听、最新状态写入和原色菜单图标不变量。
+- `performance/PERFORMANCE_4.2.md`：目录扫描、日志与标签核对性能基线。
+
+## 4.1 文档
+
+- `plans/PLAN_4.1.md`：全局快捷键、菜单栏入口和主窗口单实例的范围与验收。
+- `releases/RELEASE_NOTES_4.1.md`：4.1 使用方式、冲突提示和安装位置。
+- `maintenance/MAINTENANCE_4.1.md`：热键注册、显隐控制和权限边界。
+- `performance/PERFORMANCE_4.1.md`：4.1 正式冻结时的扫描与日志性能复验。
+
+## 4.0 文档
 
 - `plans/PLAN_4.0.md`：一键收纳桌面的范围、安全边界和验收记录。
 - `releases/RELEASE_NOTES_4.0.md`：4.0 用户可见变化、安装位置和使用方式。
@@ -46,4 +60,4 @@
 
 ## 本地发布物
 
-`Release/4.0.0/` 保留当前正式 App 和压缩包，`Release/3.0.0/` 保留上一正式基线；开发候选名称必须标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。
+`Release/4.2.0/` 保留当前正式 App 和压缩包，`Release/4.1.0/` 保留上一正式基线及4.2验收前候选；开发候选名称必须标明状态。旧版只保留 ZIP，集中放在 `Release/archive/<版本>/`。整个 `Release/` 是本地构建产物，不进入 Git；对外下载与长期分发以 GitHub Releases 为准。

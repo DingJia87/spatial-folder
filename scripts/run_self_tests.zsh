@@ -23,6 +23,8 @@ SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" \
     "$ROOT/Sources/SpatialFolder/FileIconCache.swift" \
     "$ROOT/Sources/SpatialFolder/FileOperationCoordinator.swift" \
     "$ROOT/Sources/SpatialFolder/FinderTagColor.swift" \
+    "$ROOT/Sources/SpatialFolder/FolderChangeMonitor.swift" \
+    "$ROOT/Sources/SpatialFolder/GlobalShortcut.swift" \
     "$ROOT/Sources/SpatialFolder/FolderAccessRepository.swift" \
     "$ROOT/Sources/SpatialFolder/FolderScanService.swift" \
     "$ROOT/Sources/SpatialFolder/WindowAspectRatioController.swift" \
@@ -32,6 +34,8 @@ SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" \
     "$ROOT/Sources/SpatialFolder/RecoveryAnalyzer.swift" \
     "$ROOT/Sources/SpatialFolder/FolderCanvasModel.swift" \
     "$ROOT/Tests/SelfTests/SelfTestMain.swift" \
+    -framework Carbon \
+    -framework CoreServices \
     -o "$OUTPUT"
 
 "$OUTPUT"

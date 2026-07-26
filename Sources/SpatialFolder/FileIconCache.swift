@@ -11,20 +11,49 @@ final class FileIconCache {
         cache.countLimit = max(64, countLimit)
     }
 
-    func icon(for url: URL) -> NSImage {
-        let key = url.path as NSString
+    func icon(for url: URL, folderTagColor: FinderTagColor? = nil) -> NSImage {
+        let variant = folderTagColor.map { "tag-\($0.rawValue)" } ?? "base"
+        let key = "\(url.path)|\(variant)" as NSString
         if let cached = cache.object(forKey: key) { return cached }
-        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        let baseIcon = NSWorkspace.shared.icon(forFile: url.path)
+        let icon = folderTagColor.map {
+            tintedFolderIcon(baseIcon, color: nsColor(for: $0))
+        } ?? baseIcon
         cache.setObject(icon, forKey: key)
         return icon
     }
 
     /// 同一路径的文件被外部替换后，主动丢弃旧图标以免显示过期类型。
     func invalidate(_ url: URL) {
-        cache.removeObject(forKey: url.path as NSString)
+        // 变体键包含标签颜色，无法只移除一个固定键；替换文件是低频操作，整体清理更可靠。
+        cache.removeAllObjects()
     }
 
     func removeAll() {
         cache.removeAllObjects()
+    }
+
+    private func tintedFolderIcon(_ baseIcon: NSImage, color: NSColor) -> NSImage {
+        let image = NSImage(size: baseIcon.size)
+        image.lockFocus()
+        let bounds = NSRect(origin: .zero, size: baseIcon.size)
+        baseIcon.draw(in: bounds)
+        color.withAlphaComponent(0.72).setFill()
+        bounds.fill(using: .sourceAtop)
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
+
+    private func nsColor(for color: FinderTagColor) -> NSColor {
+        switch color {
+        case .red: .systemRed
+        case .orange: .systemOrange
+        case .yellow: .systemYellow
+        case .green: .systemGreen
+        case .blue: .systemBlue
+        case .purple: .systemPurple
+        case .gray: .systemGray
+        }
     }
 }

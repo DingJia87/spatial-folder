@@ -7,8 +7,22 @@ struct FolderItem: Identifiable, Hashable {
     let url: URL
     let tags: [String]
     let resourceID: String?
+    let isDirectory: Bool
+
+    init(
+        url: URL,
+        tags: [String],
+        resourceID: String?,
+        isDirectory: Bool = false
+    ) {
+        self.url = url
+        self.tags = tags
+        self.resourceID = resourceID
+        self.isDirectory = isDirectory
+    }
 
     var id: String { url.path }
+    var renderID: String { "\(id)|\(tags.joined(separator: "\u{1F}"))|\(isDirectory)" }
     var name: String { url.lastPathComponent }
 
     static func == (lhs: FolderItem, rhs: FolderItem) -> Bool { lhs.url == rhs.url }
@@ -125,7 +139,11 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var isLoadingOperationHistory = false
     @Published var isRecoveryWizardPresented = false
 
-    private var folderMonitor: DispatchSourceFileSystemObject?
+    private var folderMonitor: FolderChangeMonitor?
+    private var legacyFolderMonitor: DispatchSourceFileSystemObject?
+    private var tagPollingTimer: DispatchSourceTimer?
+    private var tagPollingTask: Task<Void, Never>?
+    private var tagReconciliationTick = 0
     private var refreshWorkItem: DispatchWorkItem?
     private var scanTask: Task<Void, Never>?
     private var fileOperationTask: Task<Void, Never>?
@@ -262,7 +280,28 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func icon(for item: FolderItem) -> NSImage {
-        iconCache.icon(for: item.url)
+        iconCache.icon(for: item.url, folderTagColor: folderTagColor(for: item))
+    }
+
+    func currentItem(for item: FolderItem) -> FolderItem {
+        items.first(where: { $0.id == item.id }) ?? item
+    }
+
+    private func currentItems(for candidates: [FolderItem]) -> [FolderItem] {
+        var seen: Set<String> = []
+        return candidates.compactMap { candidate in
+            guard seen.insert(candidate.id).inserted else { return nil }
+            return items.first(where: { $0.id == candidate.id })
+        }
+    }
+
+    func folderTagColor(for item: FolderItem) -> FinderTagColor? {
+        guard let color = item.tags.lazy.compactMap(FinderTagColor.init(finderTag:)).first else {
+            return nil
+        }
+        if item.isDirectory { return color }
+        let isDirectory = (try? item.url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        return isDirectory ? color : nil
     }
 
     var defaultDesktopWallpaperURL: URL? {
@@ -336,6 +375,13 @@ final class FolderCanvasModel: ObservableObject {
             return
         }
         folderMonitor?.cancel()
+        folderMonitor = nil
+        legacyFolderMonitor?.cancel()
+        legacyFolderMonitor = nil
+        tagPollingTimer?.cancel()
+        tagPollingTimer = nil
+        tagPollingTask?.cancel()
+        tagPollingTask = nil
         refreshWorkItem?.cancel()
         scanTask?.cancel()
         operationHistoryLoadTask?.cancel()
@@ -413,7 +459,12 @@ final class FolderCanvasModel: ObservableObject {
     private func applyScan(_ entries: [ScannedFolderEntry], for folder: URL) {
         guard folderURL?.standardizedFileURL == folder.standardizedFileURL else { return }
         let freshItems = entries.map {
-            FolderItem(url: $0.url, tags: $0.tags, resourceID: $0.resourceID)
+            FolderItem(
+                url: $0.url,
+                tags: $0.tags,
+                resourceID: $0.resourceID,
+                isDirectory: $0.isDirectory
+            )
         }
         items = freshItems
         let currentPaths = Set(freshItems.map(\.id))
@@ -677,7 +728,7 @@ final class FolderCanvasModel: ObservableObject {
 
     /// 右键点在已选项目上时，菜单作用于整个选择集合；点在未选项目上时只作用于该项目。
     func contextItems(for item: FolderItem) -> [FolderItem] {
-        selectedIDs.contains(item.id) ? selectedItems : [item]
+        selectedIDs.contains(item.id) ? selectedItems : [currentItem(for: item)]
     }
 
     func recoverOutOfBoundsItems() {
@@ -1044,10 +1095,11 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func toggleTag(_ tag: String, for targetItems: [FolderItem]) {
-        guard realFileMutationsAllowed(), !targetItems.isEmpty else { return }
+        let targets = currentItems(for: targetItems)
+        guard realFileMutationsAllowed(), !targets.isEmpty else { return }
         let normalized = normalizedTagName(tag)
         let targetColor = FinderTagColor(finderTag: tag)
-        let tagActions = targetItems.map { item -> TagAction in
+        let tagActions = targets.map { item -> TagAction in
             var tags = item.tags
             if let targetColor,
                tags.contains(where: { FinderTagColor(finderTag: $0) == targetColor }) {
@@ -1062,16 +1114,16 @@ final class FolderCanvasModel: ObservableObject {
         if fileOperationsAsynchronously {
             guard let record = beginFileOperation(
                 kind: .tags,
-                summary: "修改 \(targetItems.count) 个项目的标签",
-                itemNames: targetItems.map(\.name)
+                summary: "修改 \(targets.count) 个项目的标签",
+                itemNames: targets.map(\.name)
             ) else { return }
             startCoordinatedTags(recordID: record.id, title: "修改标签", actions: tagActions)
             return
         }
         guard var record = beginFileOperation(
             kind: .tags,
-            summary: "修改 \(targetItems.count) 个项目的标签",
-            itemNames: targetItems.map(\.name)
+            summary: "修改 \(targets.count) 个项目的标签",
+            itemNames: targets.map(\.name)
         ) else { return }
         do {
             for value in tagActions {
@@ -1095,7 +1147,7 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func clearTags(for targetItems: [FolderItem]) {
-        let targets = targetItems.filter { !$0.tags.isEmpty }
+        let targets = currentItems(for: targetItems).filter { !$0.tags.isEmpty }
         guard realFileMutationsAllowed(), !targets.isEmpty else { return }
         let tagActions = targets.map { TagAction(path: $0.url.path, before: $0.tags, after: []) }
         if fileOperationsAsynchronously {
@@ -2930,6 +2982,13 @@ final class FolderCanvasModel: ObservableObject {
         }
         folderUnavailable = true
         folderMonitor?.cancel()
+        folderMonitor = nil
+        legacyFolderMonitor?.cancel()
+        legacyFolderMonitor = nil
+        tagPollingTimer?.cancel()
+        tagPollingTimer = nil
+        tagPollingTask?.cancel()
+        tagPollingTask = nil
         errorMessage = "原文件夹已移动、删除或所在磁盘暂不可用。请使用“重新关联”选择它的新位置。"
     }
 
@@ -2944,6 +3003,20 @@ final class FolderCanvasModel: ObservableObject {
 
     private func watchFolder() {
         guard let folderURL else { return }
+        if let monitor = FolderChangeMonitor(folderURL: folderURL, onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.scheduleRefresh()
+            }
+        }) {
+            folderMonitor = monitor
+        } else {
+            startLegacyFolderMonitoringFallback(folderURL: folderURL)
+        }
+        startTagReconciliation()
+    }
+
+    /// 保留原 vnode 监听以处理新增、删除和重命名；它本身看不到子文件标签变化。
+    private func startLegacyFolderMonitoringFallback(folderURL: URL) {
         let descriptor = Darwin.open(folderURL.path, O_EVTONLY)
         guard descriptor >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -2951,10 +3024,69 @@ final class FolderCanvasModel: ObservableObject {
             eventMask: [.write, .rename, .delete],
             queue: .main
         )
-        source.setEventHandler { [weak self] in self?.scheduleRefresh() }
-        source.setCancelHandler { close(descriptor) }
+        source.setEventHandler { [weak self] in
+            self?.scheduleRefresh()
+        }
+        source.setCancelHandler {
+            close(descriptor)
+        }
+        legacyFolderMonitor = source
         source.resume()
-        folderMonitor = source
+    }
+
+    /// 每秒核对当前可见项目的标签快照，补足 FSEvents 对扩展属性变化的事件缺口。
+    private func startTagReconciliation() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + .milliseconds(500),
+            repeating: .seconds(1),
+            leeway: .milliseconds(150)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.pollTagChanges()
+        }
+        tagPollingTimer = timer
+        timer.resume()
+    }
+
+    private func pollTagChanges() {
+        guard tagPollingTask == nil, !items.isEmpty else { return }
+        tagReconciliationTick = (tagReconciliationTick + 1) % 5
+        let needsFilteredFullSweep = hasActiveFilters && tagReconciliationTick == 0
+        var observedItems = needsFilteredFullSweep ? items : displayedItems
+        if let infoItem,
+           !observedItems.contains(where: { $0.id == infoItem.id }) {
+            observedItems.append(infoItem)
+        }
+        let urls = observedItems.map(\.url)
+        let scanService = scanService
+        tagPollingTask = Task { [weak self] in
+            let snapshot = await scanService.scanTags(for: urls)
+            guard !Task.isCancelled, let self else { return }
+            self.applyTagSnapshot(snapshot)
+            self.tagPollingTask = nil
+        }
+    }
+
+    private func applyTagSnapshot(_ snapshot: [String: [String]]) {
+        var changed = false
+        let refreshed = items.map { item in
+            guard let tags = snapshot[item.id], tags != item.tags else { return item }
+            changed = true
+            return FolderItem(
+                url: item.url,
+                tags: tags,
+                resourceID: item.resourceID,
+                isDirectory: item.isDirectory
+            )
+        }
+        guard changed else { return }
+        items = refreshed
+        if let infoItem,
+           let updated = refreshed.first(where: { $0.id == infoItem.id }) {
+            self.infoItem = updated
+        }
+        removeHiddenItemsFromSelection()
     }
 
     private func scheduleRefresh() {
