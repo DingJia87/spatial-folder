@@ -16,7 +16,7 @@ Before changing code in a new Codex task:
 4. Develop on a separate `codex/` branch, preserve real-file safety rules, and run the standard and self-test suites before packaging.
 5. Put all user-testable and formal version builds under `Release/<version>/` for discoverability. Mark development candidates clearly, and freeze the formal App/ZIP only after user validation unless the user explicitly asks otherwise.
 
-The current local repository root is `/Users/dingjia/Codexdata/虚拟化桌面项目`. The live project state and handoff notes are maintained in `docs/CURRENT_STATUS.md`.
+The live project state and handoff notes are maintained in `docs/CURRENT_STATUS.md`.
 
 ## Non-negotiable behaviour
 

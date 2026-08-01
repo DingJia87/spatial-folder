@@ -10,9 +10,26 @@
 
 当前正式版本：**v5.0.0**
 
+## 界面预览
+
+![指针空间主画布：文件按稳定位置自由摆放](docs/images/pointer-space-overview.png)
+
+真实文件保持原位，画布只记录显示位置。公开截图来自日常使用画布，文件名与空间名称已做不可逆遮挡。
+
+| Finder 标签筛选 | 收纳桌面确认 |
+| --- | --- |
+| ![只显示绿色 Finder 标签项目](docs/images/pointer-space-tag-filter.png) | ![移动桌面文件前显示数量和目标空间](docs/images/pointer-space-desktop-collection.png) |
+| 按 Finder 标签颜色快速缩小范围，不改变原有布局。 | 先显示项目数、文件数、文件夹数和目标空间，确认前绝不移动。 |
+
+### 全局快捷唤醒
+
+![全局显示和隐藏快捷键设置](docs/images/pointer-space-global-shortcut.png)
+
+默认按 `⌃⌥空格`显示指针空间；再次按下即可隐藏，不需要辅助功能或输入监控权限。
+
 ## 下载
 
-从 [GitHub Releases](https://github.com/DingJia87/spatial-folder/releases/latest) 下载 `指针空间.zip`。
+从 [GitHub Releases](https://github.com/DingJia87/spatial-folder/releases/latest) 下载页面标记为“指针空间.zip（正式安装包）”的 `Pointer-Space.zip`。
 
 1. 解压 ZIP，把 `指针空间.app` 拖入“应用程序”。
 2. 首次启动时右键 App，选择“打开”。
