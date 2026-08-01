@@ -36,7 +36,7 @@ struct ShortcutSettingsView: View {
 
             Section("使用方式") {
                 Text("App 在后台或被遮挡时，按一次置于最前；App 已在最前时，再按一次隐藏。")
-                Text("菜单栏中的空间文件夹图标始终提供同样的显示/隐藏入口。")
+                Text("菜单栏中的指针空间图标始终提供同样的显示/隐藏入口。")
                 Text("使用系统级热键注册，不需要辅助功能或输入监控权限。")
             }
             .font(.callout)

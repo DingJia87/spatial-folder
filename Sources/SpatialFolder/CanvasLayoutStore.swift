@@ -96,7 +96,7 @@ enum CanvasLayoutStoreError: LocalizedError, Equatable {
         case .noBackup:
             "当前空间还没有可恢复的布局备份。"
         case .invalidImport:
-            "选择的文件不是有效的空间文件夹布局。"
+            "选择的文件不是有效的指针空间布局。"
         case .wrongFolder:
             "这个布局属于另一个文件夹，不能导入当前空间。"
         }

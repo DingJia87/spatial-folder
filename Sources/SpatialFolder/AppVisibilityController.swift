@@ -11,8 +11,18 @@ final class AppVisibilityController: ObservableObject {
         return NSApp.isActive && mainWindow.isVisible && mainWindow.isKeyWindow
     }
 
+    var shouldRunVisibleWindowWork: Bool {
+        guard let mainWindow else { return false }
+        return !NSApp.isHidden && mainWindow.isVisible && !mainWindow.isMiniaturized
+    }
+
     func register(mainWindow: NSWindow?) {
         self.mainWindow = mainWindow
+    }
+
+    func managesWindow(_ candidate: Any?) -> Bool {
+        guard let candidate = candidate as? NSWindow, let mainWindow else { return false }
+        return candidate === mainWindow
     }
 
     func configureOpenWindow(_ action: @escaping () -> Void) {

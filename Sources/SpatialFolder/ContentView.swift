@@ -47,7 +47,7 @@ struct ContentView: View {
                 }
             }
         }
-        .alert("空间文件夹", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+        .alert("指针空间", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("好", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
         .alert(
@@ -100,8 +100,28 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            model.setTagReconciliationActive(true)
             visibilityController.configureOpenWindow {
                 openWindow(id: "main")
+            }
+        }
+        .onDisappear {
+            model.setTagReconciliationActive(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in
+            model.setTagReconciliationActive(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)) { _ in
+            model.setTagReconciliationActive(visibilityController.shouldRunVisibleWindowWork)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { notification in
+            if visibilityController.managesWindow(notification.object) {
+                model.setTagReconciliationActive(false)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didDeminiaturizeNotification)) { notification in
+            if visibilityController.managesWindow(notification.object) {
+                model.setTagReconciliationActive(true)
             }
         }
         .onPreferenceChange(ToolbarHeightPreferenceKey.self) { height in

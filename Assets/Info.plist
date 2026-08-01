@@ -5,9 +5,9 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-	<string>空间文件夹</string>
+	<string>指针空间</string>
     <key>CFBundleExecutable</key>
-    <string>空间文件夹</string>
+    <string>指针空间</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
@@ -15,13 +15,13 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>空间文件夹</string>
+	<string>指针空间</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>4.3.0</string>
+	<string>5.0.0</string>
     <key>CFBundleVersion</key>
-	<string>4300</string>
+	<string>5000</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>

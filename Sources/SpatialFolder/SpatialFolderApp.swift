@@ -22,7 +22,7 @@ struct SpatialFolderApp: App {
     }
 
     var body: some Scene {
-        Window("空间文件夹", id: "main") {
+        Window("指针空间", id: "main") {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(visibilityController)
@@ -67,7 +67,7 @@ struct SpatialFolderApp: App {
             }
         }
 
-        MenuBarExtra("空间文件夹", systemImage: "square.grid.2x2") {
+        MenuBarExtra("指针空间", systemImage: "square.grid.2x2") {
             MenuBarContentView(
                 model: model,
                 visibilityController: visibilityController,

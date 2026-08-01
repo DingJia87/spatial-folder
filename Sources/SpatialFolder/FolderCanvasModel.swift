@@ -163,6 +163,8 @@ final class FolderCanvasModel: ObservableObject {
     private var legacyFolderMonitor: DispatchSourceFileSystemObject?
     private var tagPollingTimer: DispatchSourceTimer?
     private var tagPollingTask: Task<Void, Never>?
+    private(set) var tagReconciliationIsActive = true
+    var tagReconciliationIsScheduled: Bool { tagPollingTimer != nil }
     private var tagReconciliationTick = 0
     private var refreshWorkItem: DispatchWorkItem?
     private var scanTask: Task<Void, Never>?
@@ -944,7 +946,7 @@ final class FolderCanvasModel: ObservableObject {
     func exportDiagnostics() {
         let panel = NSSavePanel()
         panel.title = "导出隐私安全的诊断信息"
-        panel.nameFieldStringValue = "空间文件夹-诊断.json"
+        panel.nameFieldStringValue = "指针空间-诊断.json"
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
@@ -1017,7 +1019,7 @@ final class FolderCanvasModel: ObservableObject {
 
     func chooseReplacementFolder() {
         let panel = NSOpenPanel()
-        panel.title = "重新关联原来的空间文件夹"
+        panel.title = "重新关联原来的空间"
         panel.prompt = "重新关联"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -2807,7 +2809,7 @@ final class FolderCanvasModel: ObservableObject {
             return false
         }
         guard !sessionIsReadOnly else {
-            errorMessage = "这个空间正在被另一个空间文件夹进程使用。当前窗口为只读模式，请先退出占用它的旧版本。"
+            errorMessage = "这个空间正在被另一个指针空间进程使用。当前窗口为只读模式，请先退出占用它的旧版本。"
             return false
         }
         guard !isLoadingOperationHistory else {
@@ -2839,7 +2841,7 @@ final class FolderCanvasModel: ObservableObject {
                 sessionIsReadOnly = true
                 sessionLockOwner = owner
                 let ownerText = owner.map { "（进程 \($0.processID)，版本 \($0.appVersion)）" } ?? ""
-                errorMessage = "这个空间已被另一个空间文件夹占用\(ownerText)。当前以只读方式打开。"
+                errorMessage = "这个空间已被另一个指针空间占用\(ownerText)。当前以只读方式打开。"
             }
         } catch {
             sessionIsReadOnly = true
@@ -3075,7 +3077,25 @@ final class FolderCanvasModel: ObservableObject {
         } else {
             startLegacyFolderMonitoringFallback(folderURL: folderURL)
         }
-        startTagReconciliation()
+        if tagReconciliationIsActive {
+            startTagReconciliation()
+        }
+    }
+
+    /// 窗口隐藏或最小化时停止标签轮询；再次可见时立即补查，避免无意义的后台唤醒。
+    func setTagReconciliationActive(_ isActive: Bool) {
+        guard tagReconciliationIsActive != isActive else { return }
+        tagReconciliationIsActive = isActive
+        if isActive {
+            guard folderURL != nil, !folderUnavailable else { return }
+            pollTagChanges()
+            startTagReconciliation()
+        } else {
+            tagPollingTimer?.cancel()
+            tagPollingTimer = nil
+            tagPollingTask?.cancel()
+            tagPollingTask = nil
+        }
     }
 
     /// 保留原 vnode 监听以处理新增、删除和重命名；它本身看不到子文件标签变化。
@@ -3099,6 +3119,7 @@ final class FolderCanvasModel: ObservableObject {
 
     /// 每秒核对当前可见项目的标签快照，补足 FSEvents 对扩展属性变化的事件缺口。
     private func startTagReconciliation() {
+        guard tagReconciliationIsActive, tagPollingTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(
             deadline: .now() + .milliseconds(500),

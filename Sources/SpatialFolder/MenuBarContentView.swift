@@ -11,7 +11,7 @@ struct MenuBarContentView: View {
         Button {
             visibilityController.toggleMainWindow()
         } label: {
-            Text("显示/隐藏空间文件夹")
+            Text("显示/隐藏指针空间")
             if shortcutSettings.isEnabled {
                 Text(shortcutSettings.shortcut.displayName)
             }
@@ -50,7 +50,7 @@ struct MenuBarContentView: View {
             NSApp.activate()
         }
 
-        Button("退出空间文件夹") {
+        Button("退出指针空间") {
             NSApp.terminate(nil)
         }
         .keyboardShortcut("q")

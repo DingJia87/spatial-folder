@@ -1,4 +1,4 @@
-# Spatial Folder Canvas — Agent Record
+# Pointer Space — Agent Record
 
 ## Product goal
 
@@ -12,7 +12,7 @@ Before changing code in a new Codex task:
 
 1. Read this file, `README.md`, `docs/CURRENT_STATUS.md`, and `docs/README.md`.
 2. Confirm the repository root and run `git status -sb` before editing.
-3. Treat `Release/2.6.0/` as the current frozen usable package; do not overwrite it during development.
+3. Treat `Release/4.3.0/` as the previous frozen usable package and `Release/5.0.0/` as the current release target; never overwrite a frozen package during development.
 4. Develop on a separate `codex/` branch, preserve real-file safety rules, and run the standard and self-test suites before packaging.
 5. Put all user-testable and formal version builds under `Release/<version>/` for discoverability. Mark development candidates clearly, and freeze the formal App/ZIP only after user validation unless the user explicitly asks otherwise.
 

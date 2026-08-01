@@ -4,8 +4,51 @@ import Foundation
 import Testing
 @testable import SpatialFolder
 
-@Suite("空间文件夹 4.3 核心回归")
+@Suite("指针空间 5.0 核心回归")
 struct SpatialFolderTests {
+    @MainActor
+    @Test("隐藏时暂停标签核对并在恢复时重新启动")
+    func testTagReconciliationFollowsWindowVisibility() async throws {
+        let base = temporaryDirectory("TagVisibility")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = base.appendingPathComponent("Root", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("test".utf8).write(to: folder.appendingPathComponent("file.txt"))
+        let suiteName = "SpatialFolderTagVisibilityTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = FolderCanvasModel(
+            layoutStore: CanvasLayoutStore(
+                layoutsDirectory: base.appendingPathComponent("Layouts", isDirectory: true)
+            ),
+            operationStore: OperationHistoryStore(
+                directory: base.appendingPathComponent("Operations", isDirectory: true)
+            ),
+            fileOperationEngine: FileOperationEngine(
+                trashDirectoryForTesting: base.appendingPathComponent("Trash", isDirectory: true)
+            ),
+            userDefaults: defaults,
+            autoOpenLastFolder: false,
+            monitorFolders: true,
+            sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
+            sessionLockingEnabled: false,
+            scansAsynchronously: true,
+            fileOperationsAsynchronously: true,
+            desktopDirectoryURL: base.appendingPathComponent("Desktop", isDirectory: true)
+        )
+
+        model.open(folder: folder)
+        try await waitUntil { model.items.count == 1 && !model.isRefreshing }
+        #expect(model.tagReconciliationIsActive)
+        #expect(model.tagReconciliationIsScheduled)
+        model.setTagReconciliationActive(false)
+        #expect(!model.tagReconciliationIsActive)
+        #expect(!model.tagReconciliationIsScheduled)
+        model.setTagReconciliationActive(true)
+        #expect(model.tagReconciliationIsActive)
+        #expect(model.tagReconciliationIsScheduled)
+    }
+
     @Test("桌面收纳确认信息区分文件和文件夹")
     func testDesktopCollectionConfirmationSummary() {
         let confirmation = DesktopCollectionConfirmation(
