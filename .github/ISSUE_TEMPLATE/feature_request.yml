@@ -1,0 +1,23 @@
+name: 功能建议
+description: 提议有助于空间定位且保持轻量的改进
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用痛点
+      description: 目前哪一步妨碍了快速找到文件？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    id: lightweight
+    attributes:
+      label: 对轻量性的影响
+      description: 是否需要后台扫描、额外权限或持续运行？

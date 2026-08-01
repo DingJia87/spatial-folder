@@ -87,6 +87,7 @@ struct SpatialFolderSelfTests {
         run("布局导出和导入") { try testExportImport() }
         run("根文件夹移动后恢复") { try testRootFolderMoveRecovery() }
         run("手动重新关联按文件名保留布局") { try testManualRelinkKeepsLayoutByName() }
+        run("默认全局快捷键可读且安全") { try testDefaultGlobalShortcut() }
 
         print("\n自测结果：\(passed) 通过，\(failed) 失败")
         if failed > 0 { exit(1) }
@@ -855,7 +856,22 @@ struct SpatialFolderSelfTests {
         fixture.model.setLocked(true)
         try check(fixture.model.isLocked, "测试未能预置锁定状态")
         fixture.model.collectDesktopItems()
-        try check(fixture.model.fileOperationProgress != nil, "收纳桌面没有立即显示准备或移动进度")
+        try check(fixture.model.fileOperationProgress != nil, "收纳桌面没有立即显示只读检查进度")
+        try await waitForFileOperation(in: fixture.model)
+        let confirmation = try require(
+            fixture.model.desktopCollectionConfirmation,
+            "桌面检查完成后没有等待用户确认"
+        )
+        try check(confirmation.totalCount == 2, "收纳确认项目总数不正确")
+        try check(confirmation.fileCount == 1, "收纳确认文件数不正确")
+        try check(confirmation.folderCount == 1, "收纳确认文件夹数不正确")
+        try check(
+            FileManager.default.fileExists(
+                atPath: fixture.desktop.appendingPathComponent(existing.name).path
+            ) && FileManager.default.fileExists(atPath: desktopFolder.path),
+            "用户确认前已经移动了真实桌面项目"
+        )
+        fixture.model.confirmDesktopCollection()
         try await waitForFileOperation(in: fixture.model)
 
         let renamedFile = fixture.folder.appendingPathComponent("item-000 2.txt")
@@ -1860,6 +1876,11 @@ struct SpatialFolderSelfTests {
             fixture.model.positions[replacementItem.id] == expected,
             "重新关联后没有按文件名保留位置；期望 \(expected)，实际 \(String(describing: fixture.model.positions[replacementItem.id]))"
         )
+    }
+
+    private static func testDefaultGlobalShortcut() throws {
+        try check(GlobalShortcut.defaultToggle.displayName == "⌃⌥空格", "默认快捷键显示错误")
+        try check(GlobalShortcut.defaultToggle.isAllowed, "默认快捷键未通过安全校验")
     }
 
     private static func assertItemsInsideBounds(_ model: FolderCanvasModel) throws {

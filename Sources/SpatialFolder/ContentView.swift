@@ -1,8 +1,12 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var model: FolderCanvasModel
+    @EnvironmentObject private var visibilityController: AppVisibilityController
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @State private var resetConfirmationPresented = false
     @State private var referenceCanvasConfirmationPresented = false
     @State private var historyPresented = false
@@ -43,7 +47,7 @@ struct ContentView: View {
                 }
             }
         }
-        .alert("空间文件夹", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+        .alert("指针空间", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("好", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
         .alert(
@@ -87,10 +91,38 @@ struct ContentView: View {
             Text("仅当旧版布局已经被小屏幕压缩时使用。文件不会移动，图标坐标会按当前显示器重新映射；操作可撤销并会自动备份。")
         }
         .background {
-            WindowAspectRatioController(
-                canvasSize: model.desktopCanvasSize,
-                fixedChromeHeight: toolbarHeight + 1
-            )
+            ZStack {
+                WindowAspectRatioController(
+                    canvasSize: model.desktopCanvasSize,
+                    fixedChromeHeight: toolbarHeight + 1
+                )
+                MainWindowRegistrationView(controller: visibilityController)
+            }
+        }
+        .onAppear {
+            model.setTagReconciliationActive(true)
+            visibilityController.configureOpenWindow {
+                openWindow(id: "main")
+            }
+        }
+        .onDisappear {
+            model.setTagReconciliationActive(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in
+            model.setTagReconciliationActive(false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didUnhideNotification)) { _ in
+            model.setTagReconciliationActive(visibilityController.shouldRunVisibleWindowWork)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { notification in
+            if visibilityController.managesWindow(notification.object) {
+                model.setTagReconciliationActive(false)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didDeminiaturizeNotification)) { notification in
+            if visibilityController.managesWindow(notification.object) {
+                model.setTagReconciliationActive(true)
+            }
         }
         .onPreferenceChange(ToolbarHeightPreferenceKey.self) { height in
             if height > 0 { toolbarHeight = height }
@@ -145,6 +177,21 @@ struct ContentView: View {
                 }
                 .disabled(!model.canCollectDesktopItems)
                 .help("收纳桌面到当前空间（⇧⌘D）")
+                .popover(
+                    isPresented: Binding(
+                        get: { model.desktopCollectionConfirmation != nil },
+                        set: { if !$0 { model.cancelDesktopCollection() } }
+                    ),
+                    arrowEdge: .top
+                ) {
+                    if let confirmation = model.desktopCollectionConfirmation {
+                        DesktopCollectionConfirmationView(
+                            confirmation: confirmation,
+                            cancel: model.cancelDesktopCollection,
+                            confirm: model.confirmDesktopCollection
+                        )
+                    }
+                }
                 Button(action: model.refreshItems) {
                     if model.isRefreshing {
                         ProgressView().controlSize(.small)
@@ -215,6 +262,12 @@ struct ContentView: View {
                     model.isLocked ? "解锁画布" : "锁定画布",
                     systemImage: model.isLocked ? "lock.open" : "lock"
                 )
+            }
+            Divider()
+            Button {
+                openSettings()
+            } label: {
+                Label("全局快捷键设置…", systemImage: "keyboard")
             }
             Divider()
             Menu {
@@ -298,10 +351,10 @@ struct ContentView: View {
                     Label {
                         Text(color.title)
                     } icon: {
-                        Image(systemName: model.selectedTagColors.contains(color)
-                            ? "checkmark.circle.fill"
-                            : "circle.fill")
-                            .foregroundStyle(color.color)
+                        Image(nsImage: color.menuIcon(
+                            selected: model.selectedTagColors.contains(color)
+                        ))
+                        .renderingMode(.original)
                     }
                 }
             }
@@ -552,7 +605,7 @@ private struct FolderCanvasView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { model.clearSelection() }
                         .gesture(selectionGesture)
-                    ForEach(model.displayedItems) { item in
+                    ForEach(model.displayedItems, id: \.renderID) { item in
                         CanvasIcon(item: item)
                     }
                     if let selection = model.selectionRect {
@@ -705,6 +758,38 @@ private final class DroppedURLCollector: @unchecked Sendable {
     }
 }
 
+private struct DesktopCollectionConfirmationView: View {
+    let confirmation: DesktopCollectionConfirmation
+    let cancel: () -> Void
+    let confirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("收纳桌面", systemImage: "tray.and.arrow.down.fill")
+                .font(.headline)
+            Text("将 \(confirmation.totalCount) 个项目移动到“\(confirmation.destinationName)”")
+                .font(.callout)
+            Text(confirmation.countDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("文件夹会连同内部内容整体移动；完成后可在“最近操作”中撤销。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("取消", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("收纳", action: confirm)
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(width: 320)
+    }
+}
+
 private struct CanvasBackground: View {
     let url: URL?
     let requestedPixelSize: CGFloat
@@ -749,9 +834,22 @@ private struct CanvasIcon: View {
         let isSelected = model.selectedIDs.contains(item.id)
         let contextItems = model.contextItems(for: item)
         let sharedOffset = model.draggingIDs.contains(item.id) ? model.dragTranslation : .zero
+        let currentItem = model.currentItem(for: item)
+        let folderTagColor = model.folderTagColor(for: currentItem)
         VStack(spacing: 5) {
-            Image(nsImage: model.icon(for: item)).resizable().interpolation(.high)
-                .frame(width: 56 * scale, height: 56 * scale)
+            ZStack {
+                Image(nsImage: model.icon(for: currentItem))
+                    .resizable()
+                    .interpolation(.high)
+                if let folderTagColor {
+                    Image(systemName: "folder.fill")
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(folderTagColor.color)
+                        .padding(3 * scale)
+                }
+            }
+            .frame(width: 56 * scale, height: 56 * scale)
             Text(item.name)
                 .font(.system(size: max(10, 12 * scale)))
                 .lineLimit(2)
@@ -759,9 +857,9 @@ private struct CanvasIcon: View {
                 .frame(width: 94 * scale)
                 .foregroundStyle(.white)
                 .shadow(radius: 2)
-            if !item.tags.isEmpty {
+            if !currentItem.tags.isEmpty {
                 HStack(spacing: 3) {
-                    ForEach(item.tags, id: \.self) { tag in
+                    ForEach(currentItem.tags, id: \.self) { tag in
                         Circle()
                             .fill(tagColor(tag))
                             .frame(width: 7 * scale, height: 7 * scale)
@@ -820,10 +918,13 @@ private struct CanvasIcon: View {
                     Button {
                         model.toggleTag(tag.encodedValue, for: contextItems)
                     } label: {
-                        if contextItems.allSatisfy({ model.hasTag(tag.encodedValue, in: $0) }) {
-                            Label(tag.title, systemImage: "checkmark")
-                        } else {
+                        Label {
                             Text(tag.title)
+                        } icon: {
+                            Image(nsImage: tag.menuIcon(selected: contextItems.allSatisfy({
+                                model.hasTag(tag.encodedValue, in: model.currentItem(for: $0))
+                            })))
+                            .renderingMode(.original)
                         }
                     }
                 }
@@ -976,6 +1077,7 @@ private extension FinderTagColor {
         case .gray: .gray
         }
     }
+
 }
 
 private struct FileInfoView: View {

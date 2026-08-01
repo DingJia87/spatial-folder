@@ -1,9 +1,184 @@
+import AppKit
+import Carbon
 import Foundation
 import Testing
 @testable import SpatialFolder
 
-@Suite("空间文件夹 4.0 核心回归")
+@Suite("指针空间 5.0 核心回归")
 struct SpatialFolderTests {
+    @MainActor
+    @Test("隐藏时暂停标签核对并在恢复时重新启动")
+    func testTagReconciliationFollowsWindowVisibility() async throws {
+        let base = temporaryDirectory("TagVisibility")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = base.appendingPathComponent("Root", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("test".utf8).write(to: folder.appendingPathComponent("file.txt"))
+        let suiteName = "SpatialFolderTagVisibilityTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = FolderCanvasModel(
+            layoutStore: CanvasLayoutStore(
+                layoutsDirectory: base.appendingPathComponent("Layouts", isDirectory: true)
+            ),
+            operationStore: OperationHistoryStore(
+                directory: base.appendingPathComponent("Operations", isDirectory: true)
+            ),
+            fileOperationEngine: FileOperationEngine(
+                trashDirectoryForTesting: base.appendingPathComponent("Trash", isDirectory: true)
+            ),
+            userDefaults: defaults,
+            autoOpenLastFolder: false,
+            monitorFolders: true,
+            sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
+            sessionLockingEnabled: false,
+            scansAsynchronously: true,
+            fileOperationsAsynchronously: true,
+            desktopDirectoryURL: base.appendingPathComponent("Desktop", isDirectory: true)
+        )
+
+        model.open(folder: folder)
+        try await waitUntil { model.items.count == 1 && !model.isRefreshing }
+        #expect(model.tagReconciliationIsActive)
+        #expect(model.tagReconciliationIsScheduled)
+        model.setTagReconciliationActive(false)
+        #expect(!model.tagReconciliationIsActive)
+        #expect(!model.tagReconciliationIsScheduled)
+        model.setTagReconciliationActive(true)
+        #expect(model.tagReconciliationIsActive)
+        #expect(model.tagReconciliationIsScheduled)
+    }
+
+    @Test("桌面收纳确认信息区分文件和文件夹")
+    func testDesktopCollectionConfirmationSummary() {
+        let confirmation = DesktopCollectionConfirmation(
+            id: UUID(),
+            destinationName: "工作桌面",
+            fileCount: 8,
+            folderCount: 4
+        )
+        #expect(confirmation.totalCount == 12)
+        #expect(confirmation.countDescription == "8 个文件、4 个文件夹")
+    }
+
+    @Test("默认全局快捷键清晰且需要安全修饰键")
+    func testGlobalShortcutValidationAndDisplay() {
+        #expect(GlobalShortcut.defaultToggle.displayName == "⌃⌥空格")
+        #expect(GlobalShortcut.defaultToggle.isAllowed)
+        #expect(!GlobalShortcut(
+            keyCode: UInt32(kVK_ANSI_A),
+            carbonModifiers: 0,
+            keyLabel: "A"
+        ).isAllowed)
+        #expect(GlobalShortcut(
+            keyCode: UInt32(kVK_F13),
+            carbonModifiers: 0,
+            keyLabel: "F13"
+        ).isAllowed)
+    }
+
+    @MainActor
+    @Test("快捷键冲突保留原组合并持久化成功设置")
+    func testGlobalShortcutConflictRollbackAndPersistence() {
+        let suiteName = "SpatialFolderShortcutTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let registrar = ShortcutRegistrarSpy()
+        let settings = GlobalShortcutSettings(
+            userDefaults: defaults,
+            registrar: registrar
+        )
+        let accepted = GlobalShortcut(
+            keyCode: UInt32(kVK_ANSI_K),
+            carbonModifiers: UInt32(cmdKey | optionKey),
+            keyLabel: "K"
+        )
+        #expect(settings.updateShortcut(accepted))
+        #expect(settings.shortcut == accepted)
+
+        registrar.nextError = .conflict
+        let rejected = GlobalShortcut(
+            keyCode: UInt32(kVK_ANSI_J),
+            carbonModifiers: UInt32(cmdKey | optionKey),
+            keyLabel: "J"
+        )
+        #expect(!settings.updateShortcut(rejected))
+        #expect(settings.shortcut == accepted)
+        #expect(settings.registrationMessage?.contains("占用") == true)
+
+        let restored = GlobalShortcutSettings(
+            userDefaults: defaults,
+            registrar: ShortcutRegistrarSpy()
+        )
+        #expect(restored.shortcut == accepted)
+        #expect(restored.isEnabled)
+    }
+
+    @MainActor
+    @Test("外部修改 Finder 标签后监听器刷新内存项目")
+    func testExternalTagChangeRefreshesModelItems() async throws {
+        let base = temporaryDirectory("AsyncTags")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = base.appendingPathComponent("Root", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let taggedFolder = folder.appendingPathComponent("tagged-folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: taggedFolder, withIntermediateDirectories: true)
+        let suiteName = "SpatialFolderAsyncTagTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = FolderCanvasModel(
+            layoutStore: CanvasLayoutStore(
+                layoutsDirectory: base.appendingPathComponent("Layouts", isDirectory: true)
+            ),
+            operationStore: OperationHistoryStore(
+                directory: base.appendingPathComponent("Operations", isDirectory: true)
+            ),
+            fileOperationEngine: FileOperationEngine(
+                trashDirectoryForTesting: base.appendingPathComponent("Trash", isDirectory: true)
+            ),
+            userDefaults: defaults,
+            autoOpenLastFolder: false,
+            monitorFolders: true,
+            sessionLockDirectory: base.appendingPathComponent("Locks", isDirectory: true),
+            sessionLockingEnabled: false,
+            scansAsynchronously: true,
+            fileOperationsAsynchronously: true,
+            desktopDirectoryURL: base.appendingPathComponent("Desktop", isDirectory: true)
+        )
+        model.open(folder: folder)
+        try await waitUntil { model.items.count == 1 && !model.isRefreshing }
+        let item = try #require(model.items.first)
+        #expect(item.isDirectory)
+        try writeFinderTags([FinderTagColor.red.encodedValue], to: item.url)
+        try await waitUntil {
+            !model.isRefreshing &&
+                model.items.first?.tags.contains(where: {
+                    FinderTagColor(finderTag: $0) == .red
+                }) == true
+        }
+        let refreshedFolder = try #require(model.items.first)
+        #expect(model.folderTagColor(for: refreshedFolder) == .red)
+        model.clearTags(for: refreshedFolder)
+        try await waitUntil {
+            !model.isFileOperationInProgress && model.items.first?.tags.isEmpty == true
+        }
+        model.toggleTag(FinderTagColor.green.encodedValue, for: refreshedFolder)
+        try await waitUntil {
+            !model.isFileOperationInProgress &&
+                model.items.first?.tags.count == 1 &&
+                model.items.first?.tags.contains(where: {
+                    FinderTagColor(finderTag: $0) == .green
+                }) == true
+        }
+        let retaggedFolder = try #require(model.items.first)
+        #expect(retaggedFolder.tags.count == 1)
+        #expect(model.folderTagColor(for: retaggedFolder) == .green)
+        try Data("new".utf8).write(to: folder.appendingPathComponent("new-item.txt"))
+        try await waitUntil {
+            !model.isRefreshing && model.items.count == 2
+        }
+    }
+
     @Test("桌面收纳筛选保留文件夹并排除危险项目")
     func testDesktopCollectionSourceFiltering() async throws {
         let root = temporaryDirectory("DesktopCollection")
@@ -33,6 +208,27 @@ struct SpatialFolderTests {
         #expect(FinderTagColor(finderTag: "自定义名称\n2") == .green)
         #expect(FinderTagColor(finderTag: "Blue") == .blue)
         #expect(FinderTagColor(finderTag: "无颜色") == nil)
+    }
+
+    @MainActor
+    @Test("标签菜单图标保留七种原色而不是模板单色")
+    func testFinderTagMenuIconsPreserveOriginalColors() throws {
+        for tag in FinderTagColor.displayOrder {
+            let image = tag.menuIcon(selected: false)
+            #expect(!image.isTemplate)
+            let tiff = try #require(image.tiffRepresentation)
+            let representation = try #require(NSBitmapImageRep(data: tiff))
+            let actual = try #require(
+                representation.colorAt(
+                    x: representation.pixelsWide / 2,
+                    y: representation.pixelsHigh / 2
+                )?.usingColorSpace(.deviceRGB)
+            )
+            let expected = try #require(tag.menuColor.usingColorSpace(.deviceRGB))
+            #expect(abs(actual.redComponent - expected.redComponent) < 0.18)
+            #expect(abs(actual.greenComponent - expected.greenComponent) < 0.18)
+            #expect(abs(actual.blueComponent - expected.blueComponent) < 0.18)
+        }
     }
 
     @Test("搜索和多标签筛选按 AND 与 OR 组合")
@@ -269,5 +465,34 @@ struct SpatialFolderTests {
                 "SpatialFolderStandardTests-\(suffix)-\(UUID().uuidString)",
                 isDirectory: true
             )
+    }
+
+    @MainActor
+    private func waitUntil(
+        timeout: TimeInterval = 5,
+        condition: () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(condition())
+    }
+}
+
+private final class ShortcutRegistrarSpy: GlobalHotKeyRegistering {
+    var nextError: GlobalHotKeyRegistrationError?
+    private(set) var registeredShortcut: GlobalShortcut?
+
+    func replaceShortcut(_ shortcut: GlobalShortcut) throws {
+        if let nextError {
+            self.nextError = nil
+            throw nextError
+        }
+        registeredShortcut = shortcut
+    }
+
+    func unregister() {
+        registeredShortcut = nil
     }
 }
