@@ -8,7 +8,7 @@
 [![Swift](https://img.shields.io/badge/Swift-6-orange?logo=swift)](Package.swift)
 [![CI](https://github.com/DingJia87/spatial-folder/actions/workflows/ci.yml/badge.svg)](https://github.com/DingJia87/spatial-folder/actions/workflows/ci.yml)
 
-当前正式版本：**v5.1.0**
+当前正式版本：**v5.2.0**
 
 ## 界面预览
 
@@ -49,6 +49,9 @@
 
 ### 空间定位
 
+- 顶部按打开顺序保留最多 5 个稳定空间位置，点击只切换高亮；第 6 个空间需明确选择替换位置。
+- 空间入口可主动拖动排序；未激活空间不扫描、不监听、不加载图标。
+- 每个空间独立保留最近 3 步布局撤销与重做，切换空间或重启后仍可继续。
 - 只展示所选文件夹的第一级内容，避免递归层级干扰空间记忆。
 - 自由摆放图标并持久保存位置、图标大小和文字大小。
 - 在“布局历史”中按时间预览、比较并恢复任意布局备份；恢复布局不会恢复或改动真实文件。

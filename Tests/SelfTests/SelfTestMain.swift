@@ -41,6 +41,7 @@ struct SpatialFolderSelfTests {
         run("画布跨进程锁独占与释放") { try testCanvasSessionLockExclusivity() }
         run("第二个画布模型进入只读模式") { try testSecondModelUsesReadOnlySession() }
         run("2.3.2 偏好迁移到稳定版本") { try testPreferencesMigration() }
+        run("空间固定槽位、满额替换与持久化排序") { try testPinnedSpacesPersistenceAndLimit() }
         run("3000 项目录扫描保持可接受耗时") { try testLargeFolderScanPerformance() }
         await runAsync("后台批量复制逐步记录并可撤销") { try await testCoordinatedTransferRoundTrip() }
         await runAsync("后台批量失败自动回滚") { try await testCoordinatedTransferFailureRollsBack() }
@@ -74,6 +75,7 @@ struct SpatialFolderSelfTests {
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
         run("撤销、重做和锁定") { try testUndoRedoAndLock() }
         run("顶部撤销与重做可连续前后三步") { try testThreeStepUndoRedo() }
+        run("每个空间独立保留三步布局撤销重做") { try testPerSpaceLayoutUndoRedoPersistence() }
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
         run("锁定状态仍可切换并保存壁纸") { try testWallpaperChangesWhileLocked() }
         run("跨屏往返不改写布局") { try testScreenSwitchDoesNotMutateLayout() }
@@ -772,6 +774,81 @@ struct SpatialFolderSelfTests {
         try check(destination.string(forKey: "lastOpenedFolderPath") == "/tmp/latest", "重复迁移改变了已完成结果")
     }
 
+    private static func testPinnedSpacesPersistenceAndLimit() throws {
+        let fixture = try makeFixture(itemCount: 0)
+        defer { fixture.cleanup() }
+        let folders = try (0..<5).map { index -> URL in
+            let folder = fixture.base.appendingPathComponent("Pinned-\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            return folder
+        }
+        try check(fixture.model.pinnedFolders == [fixture.folder.standardizedFileURL], "首个打开空间没有进入顶部")
+        fixture.model.open(folder: folders[0])
+        fixture.model.movePinnedFolder(fixture.folder, byHorizontalDistance: 60)
+        try check(
+            fixture.model.pinnedFolders.prefix(2).map(\.standardizedFileURL)
+                == [folders[0].standardizedFileURL, fixture.folder.standardizedFileURL],
+            "两个空间从左向右拖动没有交换位置"
+        )
+        fixture.model.movePinnedFolder(fixture.folder, byHorizontalDistance: -60)
+        try check(
+            fixture.model.pinnedFolders.prefix(2).map(\.standardizedFileURL)
+                == [fixture.folder.standardizedFileURL, folders[0].standardizedFileURL],
+            "两个空间从右向左拖动没有交换位置"
+        )
+        for (index, folder) in folders.prefix(4).enumerated() {
+            fixture.model.open(folder: folder)
+            try check(
+                fixture.model.pinnedFolders[index + 1] == folder.standardizedFileURL,
+                "新空间没有按打开顺序占据固定位置"
+            )
+        }
+        let originalOrder = fixture.model.pinnedFolders
+        fixture.model.open(folder: folders[0])
+        try check(fixture.model.folderURL == folders[0].standardizedFileURL, "没有高亮切换到已有空间")
+        try check(fixture.model.pinnedFolders == originalOrder, "点击已有空间错误改变了顶部顺序")
+
+        fixture.model.open(folder: folders[4])
+        try check(fixture.model.folderURL == folders[0].standardizedFileURL, "选择替换位置前错误打开了第六个空间")
+        try check(
+            fixture.model.pendingSpaceReplacementURL == folders[4].standardizedFileURL,
+            "第六个空间没有触发位置替换选择"
+        )
+        fixture.model.cancelSpaceReplacement()
+        try check(fixture.model.pendingSpaceReplacementURL == nil, "取消后仍保留替换请求")
+        try check(fixture.model.pinnedFolders == originalOrder, "取消替换错误改变了顶部顺序")
+        fixture.model.open(folder: folders[4])
+        fixture.model.replaceSpaceAndOpen(with: folders[4], replacing: folders[1])
+        try check(fixture.model.folderURL == folders[4].standardizedFileURL, "确认替换后没有打开新空间")
+        try check(fixture.model.pinnedFolders[2] == folders[4].standardizedFileURL, "新空间没有留在被替换的位置")
+        try check(fixture.model.pinnedFolders[0] == fixture.folder.standardizedFileURL, "替换错误改变了前方空间位置")
+        try check(fixture.model.pinnedFolders[3] == folders[2].standardizedFileURL, "替换错误改变了后方空间位置")
+        try check(fixture.model.toolbarSpaceFolders == fixture.model.pinnedFolders, "当前高亮错误改变了顶部顺序")
+
+        fixture.model.movePinnedFolder(folders[3], to: fixture.folder)
+        try check(
+            fixture.model.pinnedFolders.first == folders[3].standardizedFileURL,
+            "固定空间拖动排序没有生效"
+        )
+        let expectedOrder = fixture.model.pinnedFolders.map(\.standardizedFileURL)
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockingEnabled: false,
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
+        )
+        try check(
+            reopened.pinnedFolders.map(\.standardizedFileURL) == expectedOrder,
+            "固定空间顺序没有跨重启保存"
+        )
+    }
+
     private static func testLargeFolderScanPerformance() throws {
         let base = temporaryDirectory(prefix: "LargeScan")
         defer { try? FileManager.default.removeItem(at: base) }
@@ -1283,13 +1360,13 @@ struct SpatialFolderSelfTests {
         let fixture = try makeFixture(itemCount: 1)
         defer { fixture.cleanup() }
         let item = try require(fixture.model.items.first, "没有测试文件")
-        for index in 0..<51 {
+        for index in 0..<4 {
             fixture.model.setScale(index.isMultiple(of: 2) ? 1.0 : 1.25, for: item)
         }
         let layoutRecords = fixture.model.operationRecords.filter { $0.category == .layout }
-        try check(layoutRecords.count == 51, "布局历史数量不正确")
+        try check(layoutRecords.count == 4, "布局历史数量不正确")
         try check(layoutRecords.first?.state == .viewOnly, "超出撤销深度的布局仍标记为可撤销")
-        try check(layoutRecords.filter { $0.state == .applied }.count == 50, "可撤销布局数量没有限制为 50")
+        try check(layoutRecords.filter { $0.state == .applied }.count == 3, "可撤销布局数量没有限制为 3")
     }
 
     private static func testRenameConflictRequiresChoice() throws {
@@ -1625,6 +1702,57 @@ struct SpatialFolderSelfTests {
             fixture.model.redoLastAction()
             try check(fixture.model.positions[item.id] == states[expectedIndex], "连续三步重做失败")
         }
+    }
+
+    private static func testPerSpaceLayoutUndoRedoPersistence() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let firstItem = try require(fixture.model.items.first, "第一个空间没有测试文件")
+        fixture.model.move(firstItem, to: CGPoint(x: 320, y: 240))
+        let firstEarlier = try require(fixture.model.positions[firstItem.id], "第一个空间缺少第一步位置")
+        fixture.model.move(firstItem, to: CGPoint(x: 680, y: 480))
+        let firstLatest = try require(fixture.model.positions[firstItem.id], "第一个空间缺少第二步位置")
+
+        let secondFolder = fixture.base.appendingPathComponent("IndependentSpace", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondFolder, withIntermediateDirectories: true)
+        let secondURL = secondFolder.appendingPathComponent("second.txt")
+        try Data("second".utf8).write(to: secondURL)
+        fixture.model.open(folder: secondFolder)
+        let secondItem = try require(fixture.model.items.first, "第二个空间没有测试文件")
+        let secondOriginal = try require(fixture.model.positions[secondItem.id], "第二个空间缺少初始位置")
+        fixture.model.move(secondItem, to: CGPoint(x: 760, y: 520))
+        let secondLatest = try require(fixture.model.positions[secondItem.id], "第二个空间缺少移动位置")
+
+        fixture.model.open(folder: fixture.folder)
+        try check(fixture.model.positions[firstItem.id] == firstLatest, "切回第一个空间时布局变化")
+        fixture.model.undoLastAction()
+        try check(fixture.model.positions[firstItem.id] == firstEarlier, "第一个空间没有恢复自己的撤销记录")
+
+        fixture.model.open(folder: secondFolder)
+        fixture.model.undoLastAction()
+        try check(fixture.model.positions[secondItem.id] == secondOriginal, "第二个空间没有恢复自己的撤销记录")
+
+        let reopened = FolderCanvasModel(
+            layoutStore: fixture.store,
+            operationStore: fixture.operationStore,
+            fileOperationEngine: fixture.fileOperationEngine,
+            userDefaults: fixture.defaults,
+            autoOpenLastFolder: false,
+            initialCanvasSize: CGSize(width: 1024, height: 768),
+            monitorFolders: false,
+            sessionLockingEnabled: false,
+            scansAsynchronously: false,
+            fileOperationsAsynchronously: false
+        )
+        reopened.open(folder: fixture.folder)
+        try check(reopened.canRedo, "重启后没有恢复第一个空间的重做记录")
+        reopened.redoLastAction()
+        try check(reopened.positions[firstItem.id] == firstLatest, "重启后第一个空间重做失败")
+
+        reopened.open(folder: secondFolder)
+        try check(reopened.canRedo, "重启后没有恢复第二个空间的重做记录")
+        reopened.redoLastAction()
+        try check(reopened.positions[secondItem.id] == secondLatest, "重启后第二个空间重做失败")
     }
 
     private static func testLockPersistsPerFolder() throws {

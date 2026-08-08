@@ -10,6 +10,9 @@
 ## 当前开发基线
 
 - [当前状态与交接](CURRENT_STATUS.md)
+- [5.2 计划与验收](plans/PLAN_5.2.md)
+- [5.2 发布说明](releases/RELEASE_NOTES_5.2.md)
+- [5.2 性能说明](performance/PERFORMANCE_5.2.md)
 - [5.1 计划与验收](plans/PLAN_5.1.md)
 - [5.1 发布说明](releases/RELEASE_NOTES_5.1.md)
 - [5.1 性能说明](performance/PERFORMANCE_5.1.md)

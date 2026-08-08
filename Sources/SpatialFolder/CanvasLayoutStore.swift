@@ -103,6 +103,20 @@ struct LayoutBackupSnapshot: Identifiable, Equatable, Sendable {
     }
 }
 
+struct LayoutHistoryEntry: Codable, Equatable, Sendable {
+    var canvas: SavedCanvas
+    var operationID: UUID
+    var transitionDate: Date
+}
+
+struct LayoutUndoHistoryDocument: Codable, Equatable, Sendable {
+    static let currentVersion = 1
+
+    var version = currentVersion
+    var undoEntries: [LayoutHistoryEntry] = []
+    var redoEntries: [LayoutHistoryEntry] = []
+}
+
 enum CanvasLayoutLoadResult: Equatable {
     case missing
     case loaded(SavedCanvas, migratedLegacyLayout: Bool)
@@ -157,6 +171,30 @@ struct CanvasLayoutStore {
         layoutsDirectory
             .appendingPathComponent("Backups", isDirectory: true)
             .appendingPathComponent(canvasKey, isDirectory: true)
+    }
+
+    func layoutUndoHistoryURL(canvasKey: String) -> URL {
+        layoutsDirectory
+            .appendingPathComponent("UndoHistory", isDirectory: true)
+            .appendingPathComponent(canvasKey)
+            .appendingPathExtension("json")
+    }
+
+    func loadLayoutUndoHistory(canvasKey: String) throws -> LayoutUndoHistoryDocument {
+        let url = layoutUndoHistoryURL(canvasKey: canvasKey)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return LayoutUndoHistoryDocument()
+        }
+        return try JSONDecoder().decode(LayoutUndoHistoryDocument.self, from: Data(contentsOf: url))
+    }
+
+    func saveLayoutUndoHistory(_ document: LayoutUndoHistoryDocument, canvasKey: String) throws {
+        let url = layoutUndoHistoryURL(canvasKey: canvasKey)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder().encode(document).write(to: url, options: .atomic)
     }
 
     func corruptDirectory() -> URL {

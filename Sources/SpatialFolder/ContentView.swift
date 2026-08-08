@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var layoutHistoryPresented = false
     @State private var inboxPresented = false
     @State private var toolbarHeight: CGFloat = 52
+    @State private var draggedSpacePath: String?
+    @State private var spaceDragOffset: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -78,6 +80,27 @@ struct ContentView: View {
         .sheet(isPresented: $inboxPresented) {
             InboxPanelView()
                 .environmentObject(model)
+        }
+        .confirmationDialog(
+            "顶部空间已满",
+            isPresented: Binding(
+                get: { model.pendingSpaceReplacementURL != nil },
+                set: { if !$0 { model.cancelSpaceReplacement() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let replacement = model.pendingSpaceReplacementURL {
+                ForEach(Array(model.pinnedFolders.enumerated()), id: \.element.path) { index, folder in
+                    Button("替换位置 \(index + 1)：\(folder.lastPathComponent)") {
+                        model.replaceSpaceAndOpen(with: replacement, replacing: folder)
+                    }
+                }
+            }
+            Button("取消", role: .cancel) { model.cancelSpaceReplacement() }
+        } message: {
+            if let replacement = model.pendingSpaceReplacementURL {
+                Text("顶部最多保留 \(model.maximumPinnedFolders) 个空间。请选择“\(replacement.lastPathComponent)”要替换的位置；其他空间的位置不会改变。")
+            }
         }
         .sheet(isPresented: $model.isRecoveryWizardPresented) {
             RecoveryWizardView()
@@ -150,7 +173,7 @@ struct ContentView: View {
 
     private var toolbar: some View {
         HStack(spacing: 10) {
-            spacePickerMenu
+            spaceTabs
             if model.folderURL != nil {
                 Spacer(minLength: 12)
                 TextField("筛选当前空间", text: $model.searchText)
@@ -237,14 +260,106 @@ struct ContentView: View {
         }
     }
 
-    private var spacePickerMenu: some View {
-        Menu {
+    private var spaceTabs: some View {
+        ViewThatFits(in: .horizontal) {
+            spaceTabStrip(limit: 5)
+            spaceTabStrip(limit: 4)
+            spaceTabStrip(limit: 3)
+            spaceTabStrip(limit: 2)
+            spaceTabStrip(limit: 1)
+        }
+    }
+
+    private func spaceTabStrip(limit: Int) -> some View {
+        let visibleFolders = Array(model.toolbarSpaceFolders.prefix(limit))
+        return HStack(spacing: 5) {
+            ForEach(visibleFolders, id: \.path) { folder in
+                spaceTab(for: folder)
+            }
+            spaceOverflowMenu(excluding: visibleFolders)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func spaceTab(for folder: URL) -> some View {
+        let active = folder.standardizedFileURL == model.folderURL?.standardizedFileURL
+        return HStack(spacing: 2) {
+            Button {
+                if !active { model.open(folder: folder) }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: active ? "folder.fill" : "folder")
+                    Text(folder.lastPathComponent)
+                        .font(.callout.weight(active ? .semibold : .regular))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: 82)
+                .padding(.leading, 8)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isFileOperationInProgress)
+            .help(active ? "当前空间：\(folder.path)" : "切换到“\(folder.lastPathComponent)”：\(folder.path)")
+
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 3)
+                .padding(.trailing, 7)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .help("拖动调整“\(folder.lastPathComponent)”的位置")
+                .gesture(
+                    DragGesture(minimumDistance: 3)
+                        .onChanged { value in
+                            draggedSpacePath = folder.path
+                            spaceDragOffset = value.translation.width
+                        }
+                        .onEnded { value in
+                            model.movePinnedFolder(folder, byHorizontalDistance: value.translation.width)
+                            draggedSpacePath = nil
+                            spaceDragOffset = 0
+                        }
+                )
+                .accessibilityLabel("拖动调整“\(folder.lastPathComponent)”的位置")
+                .accessibilityAction {
+                    model.movePinnedFolder(folder, byHorizontalDistance: 90)
+                }
+                .allowsHitTesting(!model.isFileOperationInProgress)
+        }
+        .offset(x: draggedSpacePath == folder.path ? spaceDragOffset : 0)
+        .zIndex(draggedSpacePath == folder.path ? 1 : 0)
+        .background(
+            active ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.10),
+            in: RoundedRectangle(cornerRadius: 7)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(
+                    draggedSpacePath == folder.path
+                        ? Color.accentColor
+                        : (active ? Color.accentColor.opacity(0.7) : Color.clear),
+                    lineWidth: draggedSpacePath == folder.path ? 2 : 1
+                )
+            }
+        .contextMenu {
+            if model.isPinnedFolder(folder), !active {
+                Button("从顶部移除") { model.unpinFolder(folder) }
+            }
+            Button("在 Finder 中打开") { NSWorkspace.shared.open(folder) }
+        }
+    }
+
+    private func spaceOverflowMenu(excluding visibleFolders: [URL]) -> some View {
+        let overflowFolders = model.overflowSpaceFolders(excluding: visibleFolders)
+        return Menu {
             Button("选择文件夹…", action: model.chooseFolder)
                 .disabled(model.isFileOperationInProgress)
-            if !model.recentFolders.isEmpty {
+            if !overflowFolders.isEmpty {
                 Divider()
-                Section("最近空间") {
-                    ForEach(model.recentFolders, id: \.path) { recent in
+                Section("更多空间") {
+                    ForEach(overflowFolders, id: \.path) { recent in
                         Button {
                             model.open(folder: recent)
                         } label: {
@@ -260,18 +375,12 @@ struct ContentView: View {
                 }
             }
         } label: {
-            Label {
-                Text(model.folderURL?.lastPathComponent ?? "选择文件夹")
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 190, alignment: .leading)
-            } icon: {
-                Image(systemName: model.isLocked ? "lock.fill" : "folder")
-            }
+            Image(systemName: overflowFolders.isEmpty ? "plus" : "ellipsis")
+                .frame(width: 24, height: 24)
         }
-        .fixedSize(horizontal: true, vertical: false)
-        .help(model.isLocked ? "当前画布已锁定；切换或选择空间" : "切换或选择空间")
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("选择或打开更多空间；顶部满 \(model.maximumPinnedFolders) 个后会先选择替换位置")
     }
 
     private var canvasMenu: some View {

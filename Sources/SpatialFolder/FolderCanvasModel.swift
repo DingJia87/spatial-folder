@@ -34,12 +34,6 @@ private struct RecentFolderBookmark: Codable {
     var fallbackPath: String
 }
 
-private struct LayoutHistoryEntry {
-    var canvas: SavedCanvas
-    var operationID: UUID
-    var transitionDate: Date
-}
-
 struct PendingFileConflict: Identifiable, Equatable {
     let id = UUID()
     let title: String
@@ -99,9 +93,11 @@ final class FolderCanvasModel: ObservableObject {
     private let defaultIconScale: CGFloat = 1.25
     private let recentFoldersKey = "recentFolderPaths"
     private let recentFolderBookmarksKey = "recentFolderBookmarksV2"
+    private let pinnedFolderBookmarksKey = "pinnedFolderBookmarksV1"
     private let lastFolderBookmarkKey = "lastOpenedFolderBookmarkV2"
     private let maximumRecentFolders = 8
-    private let maximumUndoDepth = 50
+    let maximumPinnedFolders = 5
+    private let maximumUndoDepth = 3
     private let grid: CGFloat = 24
     private let layoutStore: CanvasLayoutStore
     private let operationStore: OperationHistoryStore
@@ -153,6 +149,8 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var statusMessage: String?
     @Published private(set) var appearanceMode: String
     @Published private(set) var recentFolders: [URL] = []
+    @Published private(set) var pinnedFolders: [URL] = []
+    @Published private(set) var pendingSpaceReplacementURL: URL?
     @Published var searchText = "" {
         didSet {
             if searchText != oldValue { removeHiddenItemsFromSelection() }
@@ -244,6 +242,11 @@ final class FolderCanvasModel: ObservableObject {
                 .map(URL.init(fileURLWithPath:))
                 .filter { Self.directoryExists(at: $0) }
         }
+        pinnedFolders = Self.loadRecentFolders(from: userDefaults, key: pinnedFolderBookmarksKey)
+        if userDefaults.object(forKey: pinnedFolderBookmarksKey) == nil {
+            pinnedFolders = Array(recentFolders.prefix(maximumPinnedFolders).reversed())
+            persistPinnedFolders()
+        }
         if autoOpenLastFolder, let folder = resolveLastOpenedFolder() {
             open(folder: folder)
         }
@@ -269,6 +272,24 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     var desktopCanvasSize: CGSize { canvasSize }
+
+    var toolbarSpaceFolders: [URL] {
+        Array(pinnedFolders.prefix(maximumPinnedFolders))
+    }
+
+    var overflowSpaceFolders: [URL] {
+        overflowSpaceFolders(excluding: toolbarSpaceFolders)
+    }
+
+    func overflowSpaceFolders(excluding visibleFolders: [URL]) -> [URL] {
+        let visiblePaths = Set(visibleFolders.map { $0.standardizedFileURL.path })
+        var seen = visiblePaths
+        return (pinnedFolders + recentFolders).compactMap { folder in
+            let standardized = folder.standardizedFileURL
+            guard seen.insert(standardized.path).inserted else { return nil }
+            return standardized
+        }
+    }
 
     var hasActiveFilters: Bool { itemFilter.isActive }
 
@@ -427,6 +448,60 @@ final class FolderCanvasModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url { open(folder: url) }
     }
 
+    func isPinnedFolder(_ folder: URL) -> Bool {
+        let path = folder.standardizedFileURL.path
+        return pinnedFolders.contains { $0.standardizedFileURL.path == path }
+    }
+
+    func pinFolder(_ folder: URL) {
+        let standardized = folder.standardizedFileURL
+        guard Self.directoryExists(at: standardized) else { return }
+        guard !isPinnedFolder(standardized) else { return }
+        guard pinnedFolders.count < maximumPinnedFolders else {
+            errorMessage = "顶部最多固定 \(maximumPinnedFolders) 个空间。可以先取消固定一个空间。"
+            return
+        }
+        pinnedFolders.append(standardized)
+        persistPinnedFolders()
+    }
+
+    func unpinFolder(_ folder: URL) {
+        let path = folder.standardizedFileURL.path
+        guard folderURL?.standardizedFileURL.path != path else {
+            errorMessage = "当前空间需要保留在顶部。请先切换到其他空间再移除。"
+            return
+        }
+        pinnedFolders.removeAll { $0.standardizedFileURL.path == path }
+        persistPinnedFolders()
+    }
+
+    func movePinnedFolder(_ source: URL, to target: URL) {
+        let sourcePath = source.standardizedFileURL.path
+        let targetPath = target.standardizedFileURL.path
+        guard sourcePath != targetPath,
+              let sourceIndex = pinnedFolders.firstIndex(where: { $0.standardizedFileURL.path == sourcePath }),
+              let targetIndex = pinnedFolders.firstIndex(where: { $0.standardizedFileURL.path == targetPath }) else { return }
+        let folder = pinnedFolders.remove(at: sourceIndex)
+        let insertionIndex = min(targetIndex, pinnedFolders.count)
+        pinnedFolders.insert(folder, at: insertionIndex)
+        persistPinnedFolders()
+    }
+
+    func movePinnedFolder(_ source: URL, byHorizontalDistance distance: CGFloat) {
+        guard abs(distance) >= 24 else { return }
+        let sourcePath = source.standardizedFileURL.path
+        guard let sourceIndex = pinnedFolders.firstIndex(where: {
+            $0.standardizedFileURL.path == sourcePath
+        }) else { return }
+        let direction = distance > 0 ? 1 : -1
+        let steps = max(1, Int((abs(distance) / 90).rounded()))
+        let targetIndex = min(max(0, sourceIndex + direction * steps), pinnedFolders.count - 1)
+        guard targetIndex != sourceIndex else { return }
+        let folder = pinnedFolders.remove(at: sourceIndex)
+        pinnedFolders.insert(folder, at: targetIndex)
+        persistPinnedFolders()
+    }
+
     func open(folder: URL) {
         guard !isFileOperationInProgress else {
             errorMessage = "请等待当前文件操作完成，或先取消操作，再切换空间。"
@@ -438,6 +513,46 @@ final class FolderCanvasModel: ObservableObject {
             errorMessage = "无法打开文件夹：文件夹不存在或暂时不可用。"
             return
         }
+        if standardized == folderURL?.standardizedFileURL { return }
+        if !isPinnedFolder(standardized) {
+            guard pinnedFolders.count < maximumPinnedFolders else {
+                pendingSpaceReplacementURL = standardized
+                return
+            }
+            pinnedFolders.append(standardized)
+            persistPinnedFolders()
+        }
+        performOpen(folder: standardized)
+    }
+
+    func replaceSpaceAndOpen(with replacement: URL, replacing existingFolder: URL) {
+        guard !isFileOperationInProgress else {
+            errorMessage = "请等待当前文件操作完成，或先取消操作，再切换空间。"
+            return
+        }
+        guard Self.directoryExists(at: replacement) else {
+            pendingSpaceReplacementURL = nil
+            errorMessage = "无法打开文件夹：文件夹不存在或暂时不可用。"
+            return
+        }
+        let existingPath = existingFolder.standardizedFileURL.path
+        guard let index = pinnedFolders.firstIndex(where: { $0.standardizedFileURL.path == existingPath }) else {
+            pendingSpaceReplacementURL = nil
+            return
+        }
+        let standardized = replacement.standardizedFileURL
+        pinnedFolders[index] = standardized
+        persistPinnedFolders()
+        pendingSpaceReplacementURL = nil
+        performOpen(folder: standardized)
+    }
+
+    func cancelSpaceReplacement() {
+        pendingSpaceReplacementURL = nil
+    }
+
+    private func performOpen(folder standardized: URL) {
+        persistLayoutUndoHistory()
         folderMonitor?.cancel()
         folderMonitor = nil
         legacyFolderMonitor?.cancel()
@@ -464,8 +579,7 @@ final class FolderCanvasModel: ObservableObject {
         saveLastOpenedFolder(standardized)
         remember(folder: standardized)
         selectedIDs = []
-        undoStack = []
-        redoStack = []
+        loadLayoutUndoHistory()
         pendingConflict = nil
         conflictResolution = nil
         folderUnavailable = false
@@ -805,6 +919,7 @@ final class FolderCanvasModel: ObservableObject {
         }
         if before == positions {
             undoStack.removeLast()
+            persistLayoutUndoHistory()
             operationRecords.removeAll { $0.id == operationID }
             persistOperationHistory()
             updateUndoAvailability()
@@ -846,6 +961,7 @@ final class FolderCanvasModel: ObservableObject {
         reconcileAfterLayoutRestore()
         persist(makeBackup: true, backupReason: "撤销布局前")
         setOperationState(id: previous.operationID, state: .undone, transitionDate: now)
+        persistLayoutUndoHistory()
         updateUndoAvailability()
     }
 
@@ -862,6 +978,7 @@ final class FolderCanvasModel: ObservableObject {
         reconcileAfterLayoutRestore()
         persist(makeBackup: true, backupReason: "重做布局前")
         setOperationState(id: next.operationID, state: .applied, transitionDate: now)
+        persistLayoutUndoHistory()
         updateUndoAvailability()
     }
 
@@ -1190,7 +1307,8 @@ final class FolderCanvasModel: ObservableObject {
     func relink(to replacement: URL, preservingCurrentLayout: Bool) {
         guard Self.directoryExists(at: replacement) else { return }
         let previous = savedCanvas
-        open(folder: replacement)
+        replaceCurrentSpaceReference(with: replacement)
+        performOpen(folder: replacement.standardizedFileURL)
         guard preservingCurrentLayout, !sessionIsReadOnly else { return }
         var transferred = remappedCanvas(previous, to: replacement.standardizedFileURL, matching: items)
         transferred.rootResourceID = rootResourceID
@@ -2651,7 +2769,7 @@ final class FolderCanvasModel: ObservableObject {
     @discardableResult
     private func captureUndoSnapshot(summary: String = "调整画布布局") -> UUID {
         syncSavedCanvas()
-        invalidateRedoHistory()
+        invalidateRedoHistory(persistLayoutHistory: false)
         let record = OperationRecord(
             category: .layout,
             kind: .layout,
@@ -2672,8 +2790,36 @@ final class FolderCanvasModel: ObservableObject {
                 detail: "布局撤销深度已达上限；操作记录仍可查看。"
             )
         }
+        persistLayoutUndoHistory()
         updateUndoAvailability()
         return record.id
+    }
+
+    private func loadLayoutUndoHistory() {
+        undoStack = []
+        redoStack = []
+        guard let canvasKey else { return }
+        do {
+            let document = try layoutStore.loadLayoutUndoHistory(canvasKey: canvasKey)
+            guard document.version == LayoutUndoHistoryDocument.currentVersion else { return }
+            undoStack = Array(document.undoEntries.suffix(maximumUndoDepth))
+            redoStack = Array(document.redoEntries.suffix(maximumUndoDepth))
+        } catch {
+            errorMessage = "当前空间的布局撤销记录无法读取，已从空记录继续；布局和真实文件不受影响。"
+        }
+    }
+
+    private func persistLayoutUndoHistory() {
+        guard let canvasKey else { return }
+        let document = LayoutUndoHistoryDocument(
+            undoEntries: Array(undoStack.suffix(maximumUndoDepth)),
+            redoEntries: Array(redoStack.suffix(maximumUndoDepth))
+        )
+        do {
+            try layoutStore.saveLayoutUndoHistory(document, canvasKey: canvasKey)
+        } catch {
+            errorMessage = "无法保存当前空间的布局撤销记录：\(error.localizedDescription)"
+        }
     }
 
     private func updateUndoAvailability() {
@@ -2951,7 +3097,7 @@ final class FolderCanvasModel: ObservableObject {
         enqueueOperationJournalUpsert([operationRecords[index]])
     }
 
-    private func invalidateRedoHistory() {
+    private func invalidateRedoHistory(persistLayoutHistory shouldPersistLayoutHistory: Bool = true) {
         let invalidatedIDs = Set(redoStack.map(\.operationID))
         redoStack = []
         for index in operationRecords.indices where
@@ -2963,6 +3109,7 @@ final class FolderCanvasModel: ObservableObject {
         if !invalidatedIDs.isEmpty || !changedRecords.isEmpty {
             enqueueOperationJournalUpsert(changedRecords)
         }
+        if shouldPersistLayoutHistory { persistLayoutUndoHistory() }
     }
 
     private func realFileMutationsAllowed() -> Bool {
@@ -3251,7 +3398,8 @@ final class FolderCanvasModel: ObservableObject {
         if let lastFolderBookmark,
            let resolved = resolveBookmark(lastFolderBookmark),
            Self.directoryExists(at: resolved), resolved != folderURL {
-            open(folder: resolved)
+            replaceCurrentSpaceReference(with: resolved)
+            performOpen(folder: resolved.standardizedFileURL)
             errorMessage = "检测到文件夹已移动，原空间布局已经自动重新关联。"
             return
         }
@@ -3402,6 +3550,26 @@ final class FolderCanvasModel: ObservableObject {
         if let data = try? JSONEncoder().encode(records) {
             defaults.set(data, forKey: recentFolderBookmarksKey)
         }
+    }
+
+    private func persistPinnedFolders() {
+        pinnedFolders = Array(pinnedFolders.prefix(maximumPinnedFolders))
+        let records = pinnedFolders.compactMap { folder -> RecentFolderBookmark? in
+            guard let bookmark = makeBookmark(for: folder) else { return nil }
+            return RecentFolderBookmark(bookmarkData: bookmark, fallbackPath: folder.path)
+        }
+        if let data = try? JSONEncoder().encode(records) {
+            defaults.set(data, forKey: pinnedFolderBookmarksKey)
+        }
+    }
+
+    private func replaceCurrentSpaceReference(with replacement: URL) {
+        guard let currentPath = folderURL?.standardizedFileURL.path,
+              let index = pinnedFolders.firstIndex(where: { $0.standardizedFileURL.path == currentPath }) else {
+            return
+        }
+        pinnedFolders[index] = replacement.standardizedFileURL
+        persistPinnedFolders()
     }
 
     private static func loadRecentFolders(from defaults: UserDefaults, key: String) -> [URL] {
