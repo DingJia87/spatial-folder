@@ -8,7 +8,7 @@
 [![Swift](https://img.shields.io/badge/Swift-6-orange?logo=swift)](Package.swift)
 [![CI](https://github.com/DingJia87/spatial-folder/actions/workflows/ci.yml/badge.svg)](https://github.com/DingJia87/spatial-folder/actions/workflows/ci.yml)
 
-当前正式版本：**v5.0.0**
+当前正式版本：**v5.1.0**
 
 ## 界面预览
 
@@ -51,6 +51,7 @@
 
 - 只展示所选文件夹的第一级内容，避免递归层级干扰空间记忆。
 - 自由摆放图标并持久保存位置、图标大小和文字大小。
+- 在“布局历史”中按时间预览、比较并恢复任意布局备份；恢复布局不会恢复或改动真实文件。
 - 新文件进入可预测位置，不会重新排列已有内容。
 - 搜索可与 Finder 标签颜色组合筛选；超过主画布容量的项目进入独立待放置区。
 - 每个显示器使用同一逻辑画布，切换屏幕不会改写坐标。

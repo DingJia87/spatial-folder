@@ -18,6 +18,8 @@ struct SpatialFolderSelfTests {
 
     static func main() async {
         run("备份数量限制与恢复") { try testBackupRetentionAndRestore() }
+        run("布局备份元数据与指定恢复") { try testLayoutBackupMetadataAndSelectedRestore() }
+        run("删除所选布局备份不影响当前布局") { try testDeleteSelectedLayoutBackup() }
         run("损坏布局自动恢复") { try testCorruptRecovery() }
         run("无备份损坏布局阻断") { try testCorruptWithoutBackupBlocks() }
         run("旧版路径布局迁移") { try testLegacyMigration() }
@@ -71,6 +73,7 @@ struct SpatialFolderSelfTests {
         run("搜索和标签筛选切换空间后清空") { try testFiltersResetWhenOpeningSpace() }
         run("外部重命名保持位置") { try testExternalRenameKeepsPosition() }
         run("撤销、重做和锁定") { try testUndoRedoAndLock() }
+        run("顶部撤销与重做可连续前后三步") { try testThreeStepUndoRedo() }
         run("锁定状态按文件夹持久保存") { try testLockPersistsPerFolder() }
         run("锁定状态仍可切换并保存壁纸") { try testWallpaperChangesWhileLocked() }
         run("跨屏往返不改写布局") { try testScreenSwitchDoesNotMutateLayout() }
@@ -85,6 +88,8 @@ struct SpatialFolderSelfTests {
         run("小屏重启保持原基准画布") { try testRestartOnSmallerDisplayKeepsReferenceCanvas() }
         run("v4 压缩布局迁移到大屏基准") { try testVersionFourReferenceMigration() }
         run("布局导出和导入") { try testExportImport() }
+        run("保存当前快照不会带入已删除文件的旧坐标") { try testCurrentSnapshotPrunesDeletedLayoutEntries() }
+        run("恢复布局忽略已删除文件并保留新增文件位置") { try testLayoutRestoreHandlesMissingAndNewFiles() }
         run("根文件夹移动后恢复") { try testRootFolderMoveRecovery() }
         run("手动重新关联按文件名保留布局") { try testManualRelinkKeepsLayoutByName() }
         run("默认全局快捷键可读且安全") { try testDefaultGlobalShortcut() }
@@ -139,6 +144,68 @@ struct SpatialFolderSelfTests {
         try check(store.backupURLs(canvasKey: key).count == 3, "备份数量不是 3")
         let restored = try store.restoreLatestBackup(canvasKey: key)
         try check(restored.positions["file"]?.x == 3, "没有恢复最新备份")
+    }
+
+    private static func testLayoutBackupMetadataAndSelectedRestore() throws {
+        let directory = temporaryDirectory(prefix: "BackupMetadata")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CanvasLayoutStore(layoutsDirectory: directory)
+        let key = store.canvasKey(for: "root-metadata")
+        let first = SavedCanvas(
+            positions: ["/tmp/first.txt": CanvasPoint(x: 120, y: 240)],
+            wallpaperPath: "/tmp/old-wallpaper.png",
+            isLocked: true,
+            rootResourceID: "root-metadata"
+        )
+        let current = SavedCanvas(
+            positions: ["/tmp/first.txt": CanvasPoint(x: 480, y: 360)],
+            wallpaperPath: "/tmp/current-wallpaper.png",
+            isLocked: false,
+            rootResourceID: "root-metadata"
+        )
+        try store.save(first, canvasKey: key, makeBackup: false)
+        try store.save(
+            current,
+            canvasKey: key,
+            makeBackup: true,
+            backupReason: "汇报前",
+            appVersion: "5.1.0"
+        )
+        let snapshot = try require(store.backupSnapshots(canvasKey: key).first, "没有生成可读备份")
+        try check(snapshot.reason == "汇报前", "备份原因没有保存")
+        try check(snapshot.appVersion == "5.1.0", "备份版本没有保存")
+        let restored = try store.restoreBackup(
+            snapshot,
+            canvasKey: key,
+            preservingAppearanceFrom: current,
+            restoreAppearance: false,
+            appVersion: "5.1.0"
+        )
+        try check(restored.positions == first.positions, "没有恢复选中的布局坐标")
+        try check(restored.wallpaperPath == current.wallpaperPath, "默认恢复布局时错误修改了壁纸")
+        try check(restored.isLocked == current.isLocked, "默认恢复布局时错误修改了锁定状态")
+    }
+
+    private static func testDeleteSelectedLayoutBackup() throws {
+        let directory = temporaryDirectory(prefix: "DeleteBackup")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CanvasLayoutStore(layoutsDirectory: directory)
+        let key = store.canvasKey(for: "root-delete-backup")
+        let current = SavedCanvas(
+            positions: ["/tmp/current.txt": CanvasPoint(x: 240, y: 360)],
+            rootResourceID: "root-delete-backup"
+        )
+        try store.save(current, canvasKey: key, makeBackup: false)
+        try store.createBackup(current, canvasKey: key, reason: "第一份")
+        try store.createBackup(current, canvasKey: key, reason: "第二份")
+        let snapshots = store.backupSnapshots(canvasKey: key)
+        let selected = try require(snapshots.first { $0.reason == "第一份" }, "没有待删除备份")
+        try store.deleteBackup(selected, canvasKey: key)
+        try check(store.backupSnapshots(canvasKey: key).count == 1, "没有只删除所选备份")
+        guard case let .loaded(loaded, _) = try store.load(canvasKey: key, legacyFolderPath: nil) else {
+            throw SelfTestFailure(description: "删除备份后当前布局无法读取")
+        }
+        try check(loaded.positions == current.positions, "删除备份错误修改了当前布局")
     }
 
     private static func testCorruptRecovery() throws {
@@ -1477,7 +1544,10 @@ struct SpatialFolderSelfTests {
         fixture.model.toggleUntaggedFilter()
         try check(fixture.model.hasActiveFilters, "测试没有建立筛选状态")
 
-        fixture.model.open(folder: fixture.folder)
+        let secondFolder = fixture.base.appendingPathComponent("SecondSpace", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondFolder, withIntermediateDirectories: true)
+        try Data("second".utf8).write(to: secondFolder.appendingPathComponent("second.txt"))
+        fixture.model.open(folder: secondFolder)
 
         try check(fixture.model.searchText.isEmpty, "切换空间后搜索没有清空")
         try check(fixture.model.selectedTagColors.isEmpty, "切换空间后颜色筛选没有清空")
@@ -1530,6 +1600,31 @@ struct SpatialFolderSelfTests {
         fixture.model.setLocked(true)
         fixture.model.move(item, to: CGPoint(x: 100, y: 100))
         try check(fixture.model.positions[item.id] == moved, "锁定后仍能移动")
+    }
+
+    private static func testThreeStepUndoRedo() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let item = try require(fixture.model.items.first, "没有测试文件")
+        var states = [try require(fixture.model.positions[item.id], "没有初始位置")]
+        for point in [
+            CGPoint(x: 300, y: 240),
+            CGPoint(x: 520, y: 360),
+            CGPoint(x: 760, y: 520)
+        ] {
+            fixture.model.move(item, to: point)
+            states.append(try require(fixture.model.positions[item.id], "三步移动缺少位置"))
+        }
+        try check(fixture.model.undoHelpText.contains("移动图标"), "撤销提示没有说明具体操作")
+        for expectedIndex in stride(from: 2, through: 0, by: -1) {
+            fixture.model.undoLastAction()
+            try check(fixture.model.positions[item.id] == states[expectedIndex], "连续三步撤销失败")
+        }
+        try check(fixture.model.redoHelpText.contains("移动图标"), "重做提示没有说明具体操作")
+        for expectedIndex in 1...3 {
+            fixture.model.redoLastAction()
+            try check(fixture.model.positions[item.id] == states[expectedIndex], "连续三步重做失败")
+        }
     }
 
     private static func testLockPersistsPerFolder() throws {
@@ -1831,6 +1926,66 @@ struct SpatialFolderSelfTests {
         fixture.model.move(item, to: CGPoint(x: 200, y: 200))
         try fixture.model.importLayout(from: exportURL)
         try check(fixture.model.positions[item.id] == exported, "导入没有恢复导出位置")
+    }
+
+    private static func testLayoutRestoreHandlesMissingAndNewFiles() throws {
+        let fixture = try makeFixture(itemCount: 2)
+        defer { fixture.cleanup() }
+        let deletedItem = try require(
+            fixture.model.items.first { $0.name == "item-000.txt" },
+            "没有待删除测试文件"
+        )
+        fixture.model.move(deletedItem, to: CGPoint(x: 650, y: 430))
+        fixture.model.saveLayoutSnapshot(note: "删除文件前")
+        fixture.model.loadLayoutBackups()
+        let snapshot = try require(fixture.model.layoutBackups.first, "没有布局快照")
+
+        try FileManager.default.removeItem(at: deletedItem.url)
+        let newURL = fixture.folder.appendingPathComponent("new-after-backup.txt")
+        try Data("new".utf8).write(to: newURL)
+        fixture.model.refreshItems()
+        let newItem = try require(
+            fixture.model.items.first { $0.name == newURL.lastPathComponent },
+            "新增文件没有进入画布"
+        )
+        fixture.model.move(newItem, to: CGPoint(x: 780, y: 540))
+        let newPosition = try require(fixture.model.positions[newItem.id], "新增文件没有位置")
+
+        let difference = fixture.model.layoutDifference(for: snapshot)
+        try check(difference.missingItemCount == 1, "没有识别布局中已删除的文件")
+        try check(difference.newItemCount == 1, "没有识别备份后新增的文件")
+        try check(
+            fixture.model.missingItemNames(for: snapshot) == [deletedItem.name],
+            "缺失文件提示名称不正确"
+        )
+
+        fixture.model.restoreLayoutBackup(snapshot, restoreAppearance: false)
+        try check(!FileManager.default.fileExists(atPath: deletedItem.url.path), "恢复布局错误重建了已删除文件")
+        try check(FileManager.default.fileExists(atPath: newURL.path), "恢复布局错误删除了新增文件")
+        try check(fixture.model.positions[newItem.id] == newPosition, "恢复布局改变了新增文件位置")
+    }
+
+    private static func testCurrentSnapshotPrunesDeletedLayoutEntries() throws {
+        let fixture = try makeFixture(itemCount: 2)
+        defer { fixture.cleanup() }
+        let deletedItem = try require(
+            fixture.model.items.first { $0.name == "item-000.txt" },
+            "没有待删除测试文件"
+        )
+        fixture.model.setScale(1.5, for: deletedItem)
+        try FileManager.default.removeItem(at: deletedItem.url)
+        fixture.model.refreshItems()
+
+        fixture.model.saveLayoutSnapshot(note: "当前布局")
+        fixture.model.loadLayoutBackups()
+        let snapshot = try require(fixture.model.layoutBackups.first, "没有生成当前布局快照")
+        try check(snapshot.canvas.positions[deletedItem.id] == nil, "当前快照仍带入已删除文件坐标")
+        try check(snapshot.canvas.scales[deletedItem.id] == nil, "当前快照仍带入已删除文件缩放")
+        let difference = fixture.model.layoutDifference(for: snapshot)
+        try check(difference.changedCount == 0, "刚保存的快照错误显示需要调整")
+        try check(difference.newItemCount == 0, "刚保存的快照错误显示新增项目")
+        try check(difference.missingItemCount == 0, "刚保存的快照错误显示已不存在项目")
+        try check(difference.unchangedCount == fixture.model.items.count, "刚保存的快照与当前项目数不一致")
     }
 
     private static func testRootFolderMoveRecovery() throws {

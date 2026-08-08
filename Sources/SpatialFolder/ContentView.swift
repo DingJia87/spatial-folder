@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var resetConfirmationPresented = false
     @State private var referenceCanvasConfirmationPresented = false
     @State private var historyPresented = false
+    @State private var layoutHistoryPresented = false
     @State private var inboxPresented = false
     @State private var toolbarHeight: CGFloat = 52
 
@@ -68,6 +69,10 @@ struct ContentView: View {
         }
         .sheet(isPresented: $historyPresented) {
             OperationHistoryView()
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $layoutHistoryPresented) {
+            LayoutHistoryView()
                 .environmentObject(model)
         }
         .sheet(isPresented: $inboxPresented) {
@@ -151,6 +156,7 @@ struct ContentView: View {
                 TextField("筛选当前空间", text: $model.searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 210)
+                    .help("按文件名或 Finder 标签搜索当前空间")
                 tagFilterMenu
                 if model.operationHistoryIsBlocked {
                     Button { historyPresented = true } label: {
@@ -176,7 +182,7 @@ struct ContentView: View {
                         .labelStyle(.iconOnly)
                 }
                 .disabled(!model.canCollectDesktopItems)
-                .help("收纳桌面到当前空间（⇧⌘D）")
+                .help("先显示桌面项目数量和目标空间；确认后才移动桌面第一级文件和文件夹（⇧⌘D）")
                 .popover(
                     isPresented: Binding(
                         get: { model.desktopCollectionConfirmation != nil },
@@ -192,6 +198,18 @@ struct ContentView: View {
                         )
                     }
                 }
+                Button(action: model.undoLastAction) {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .disabled(!model.canUndo)
+                .help(model.undoHelpText)
+                .accessibilityLabel("撤销上一步操作")
+                Button(action: model.redoLastAction) {
+                    Image(systemName: "arrow.uturn.forward")
+                }
+                .disabled(!model.canRedo)
+                .help(model.redoHelpText)
+                .accessibilityLabel("重做上一步操作")
                 Button(action: model.refreshItems) {
                     if model.isRefreshing {
                         ProgressView().controlSize(.small)
@@ -199,7 +217,8 @@ struct ContentView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
-                    .help("刷新")
+                .help("重新扫描当前空间。仅在 Finder 中新增、删除、改名或修改标签后，画布没有及时更新时使用")
+                .accessibilityLabel("刷新当前空间")
                 canvasMenu
             } else {
                 Spacer()
@@ -309,11 +328,11 @@ struct ContentView: View {
                 }
                 .disabled(model.isLocked)
                 Divider()
-                Button("恢复最近备份", action: model.restoreLatestBackup)
-                    .disabled(model.backupCount == 0)
-                Button("查看布局备份（\(model.backupCount)）", action: model.revealBackups)
-                Button("导出布局…", action: model.exportLayout)
-                Button("导入布局…", action: model.importLayout)
+                Button {
+                    layoutHistoryPresented = true
+                } label: {
+                    Label("布局历史（\(model.backupCount)）…", systemImage: "clock.arrow.2.circlepath")
+                }
                 Divider()
                 Button("重置当前布局", role: .destructive) {
                     resetConfirmationPresented = true
@@ -326,7 +345,7 @@ struct ContentView: View {
                 .labelStyle(.iconOnly)
         }
         .fixedSize(horizontal: true, vertical: false)
-        .help("画布、外观和布局设置")
+        .help("打开壁纸、外观、全局快捷键、最近操作和布局维护等低频设置")
     }
 
     @ViewBuilder
@@ -502,6 +521,296 @@ private struct OperationHistoryView: View {
             .padding()
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+}
+
+private struct LayoutHistoryView: View {
+    @EnvironmentObject private var model: FolderCanvasModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedID: String?
+    @State private var restoreAppearance = false
+    @State private var restoreConfirmationPresented = false
+    @State private var deleteConfirmationPresented = false
+    @State private var snapshotPromptPresented = false
+    @State private var snapshotNote = ""
+
+    private var selectedSnapshot: LayoutBackupSnapshot? {
+        model.layoutBackups.first { $0.id == selectedID } ?? model.layoutBackups.first
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("布局历史").font(.title2.weight(.semibold))
+                    Text("预览和恢复图标位置；真实文件始终保持不变。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("保存当前快照…") {
+                    snapshotNote = suggestedSnapshotName
+                    snapshotPromptPresented = true
+                }
+                .disabled(model.sessionIsReadOnly || model.layoutIsBlocked)
+                Menu("更多") {
+                    Button("导出当前布局文件…", action: model.exportLayout)
+                    Button("从布局文件导入…", action: model.importLayout)
+                        .disabled(model.sessionIsReadOnly)
+                    Divider()
+                    Button("在访达中显示备份", action: model.revealBackups)
+                }
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+            Divider()
+
+            HStack(spacing: 0) {
+                backupList
+                    .frame(width: 270)
+                Divider()
+                backupDetail
+            }
+        }
+        .frame(minWidth: 940, minHeight: 620)
+        .onAppear {
+            model.loadLayoutBackups()
+            selectedID = model.layoutBackups.first?.id
+        }
+        .onChange(of: model.layoutBackups) { _, backups in
+            if !backups.contains(where: { $0.id == selectedID }) {
+                selectedID = backups.first?.id
+            }
+        }
+        .alert("保存当前布局快照", isPresented: $snapshotPromptPresented) {
+            TextField("快照名称", text: $snapshotNote)
+            Button("取消", role: .cancel) { snapshotNote = "" }
+            Button("保存") {
+                model.saveLayoutSnapshot(note: snapshotNote)
+                snapshotNote = ""
+            }
+        } message: {
+            Text("已生成推荐名称，你也可以改成“整理完成”或“汇报前”等说明。")
+        }
+        .alert("恢复这个布局？", isPresented: $restoreConfirmationPresented) {
+            Button("取消", role: .cancel) {}
+            Button("恢复", role: .destructive) {
+                if let selectedSnapshot {
+                    model.restoreLayoutBackup(selectedSnapshot, restoreAppearance: restoreAppearance)
+                }
+            }
+        } message: {
+            if let selectedSnapshot {
+                let difference = model.layoutDifference(for: selectedSnapshot)
+                Text("将调整 \(difference.changedCount) 个现有项目；\(difference.newItemCount) 个新增项目保持原位；\(difference.missingItemCount) 个已不存在的项目会被忽略。真实文件不会被移动、创建或删除。")
+            }
+        }
+        .alert("删除这份布局备份？", isPresented: $deleteConfirmationPresented) {
+            Button("取消", role: .cancel) {}
+            Button("删除备份", role: .destructive) {
+                if let selectedSnapshot {
+                    model.deleteLayoutBackup(selectedSnapshot)
+                }
+            }
+        } message: {
+            if let selectedSnapshot {
+                Text("将删除“\(selectedSnapshot.reason)”这份布局备份，且不能在 App 内撤销。当前布局和真实文件不会受到影响。")
+            }
+        }
+    }
+
+    private var backupList: some View {
+        List(selection: $selectedID) {
+            ForEach(model.layoutBackups) { snapshot in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(snapshot.reason)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(2)
+                    Text(snapshot.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text("\(snapshot.itemCount) 个项目")
+                        if let version = snapshot.appVersion {
+                            Text("v\(version)")
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 4)
+                .tag(snapshot.id)
+            }
+        }
+        .overlay {
+            if model.layoutBackups.isEmpty {
+                ContentUnavailableView(
+                    "还没有布局备份",
+                    systemImage: "clock.arrow.2.circlepath",
+                    description: Text("调整布局或手动保存快照后会显示在这里。")
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var backupDetail: some View {
+        if let snapshot = selectedSnapshot {
+            let difference = model.layoutDifference(for: snapshot)
+            let missingNames = model.missingItemNames(for: snapshot)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(snapshot.reason).font(.title3.weight(.semibold))
+                        Text(snapshot.createdAt.formatted(date: .long, time: .standard))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 10) {
+                        differenceBadge("\(difference.changedCount) 将调整", color: .blue)
+                        differenceBadge("\(difference.unchangedCount) 不变", color: .secondary)
+                        differenceBadge("\(difference.newItemCount) 新增保留", color: .green)
+                        differenceBadge("\(difference.missingItemCount) 已不存在", color: .orange)
+                    }
+
+                    HStack(alignment: .top, spacing: 16) {
+                        previewCard(title: "当前布局", canvas: model.currentCanvasForPreview)
+                        previewCard(title: "备份布局", canvas: model.canvasForBackupPreview(snapshot))
+                    }
+
+                    if !missingNames.isEmpty {
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(missingNames, id: \.self) { name in
+                                    Label(name, systemImage: "questionmark.square.dashed")
+                                        .font(.caption)
+                                }
+                            }
+                            .padding(.top, 6)
+                        } label: {
+                            Label(
+                                "\(missingNames.count) 个备份项目当前已不存在，恢复时将忽略",
+                                systemImage: "exclamationmark.triangle.fill"
+                            )
+                            .foregroundStyle(.orange)
+                        }
+                    }
+
+                    Toggle("同时恢复当时的壁纸和锁定状态", isOn: $restoreAppearance)
+                    Text("默认只恢复位置、大小、待放置状态和基准画布；新增文件保持现在的位置。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack {
+                        Button("删除所选备份…", role: .destructive) {
+                            deleteConfirmationPresented = true
+                        }
+                        .disabled(model.sessionIsReadOnly)
+                        Spacer()
+                        Button("恢复这个布局…") { restoreConfirmationPresented = true }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.sessionIsReadOnly)
+                    }
+                }
+                .padding(20)
+            }
+        } else {
+            ContentUnavailableView("选择一份布局备份", systemImage: "square.grid.3x3")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func differenceBadge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(color.opacity(0.12), in: Capsule())
+            .foregroundStyle(color)
+    }
+
+    private var suggestedSnapshotName: String {
+        "当前布局 · \(Date().formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private func previewCard(title: String, canvas: SavedCanvas) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title).font(.callout.weight(.semibold))
+                Spacer()
+                if !canvas.inboxIDs.isEmpty {
+                    Text("待放置 \(canvas.inboxIDs.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            LayoutCanvasPreview(canvas: canvas, currentItemIDs: Set(model.items.map(\.id)))
+                .frame(minHeight: 240)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct LayoutCanvasPreview: View {
+    let canvas: SavedCanvas
+    let currentItemIDs: Set<String>
+
+    var body: some View {
+        GeometryReader { geometry in
+            let logicalSize = canvas.canvasSize?.size ?? CGSize(width: 1440, height: 900)
+            let visibleIDs = canvas.positions.keys.filter { !canvas.inboxIDs.contains($0) }
+            let showsLabels = visibleIDs.count <= 28
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(.separator, lineWidth: 1)
+                    }
+                ForEach(canvas.positions.keys.sorted(), id: \.self) { id in
+                    if let point = canvas.positions[id], !canvas.inboxIDs.contains(id) {
+                        previewItem(
+                            id: id,
+                            point: point,
+                            logicalSize: logicalSize,
+                            geometrySize: geometry.size,
+                            showsLabel: showsLabels
+                        )
+                    }
+                }
+            }
+        }
+        .aspectRatio(16 / 10, contentMode: .fit)
+    }
+
+    private func previewItem(
+        id: String,
+        point: CanvasPoint,
+        logicalSize: CGSize,
+        geometrySize: CGSize,
+        showsLabel: Bool
+    ) -> some View {
+        let missing = !currentItemIDs.contains(id)
+        let name = URL(fileURLWithPath: id).lastPathComponent
+        let x = min(max(28, point.x / max(1, logicalSize.width) * geometrySize.width), geometrySize.width - 28)
+        let y = min(max(18, point.y / max(1, logicalSize.height) * geometrySize.height), geometrySize.height - 18)
+        return VStack(spacing: 2) {
+            Image(systemName: missing ? "questionmark.square.dashed" : "doc.fill")
+                .font(.system(size: showsLabel ? 11 : 9))
+            if showsLabel {
+                Text(name)
+                    .font(.system(size: 7))
+                    .lineLimit(1)
+                    .frame(width: 52)
+            }
+        }
+        .foregroundStyle(missing ? Color.orange : Color.accentColor)
+        .help(name)
+        .position(x: x, y: y)
     }
 }
 

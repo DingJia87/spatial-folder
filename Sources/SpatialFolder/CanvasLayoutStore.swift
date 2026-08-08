@@ -18,6 +18,12 @@ struct CanvasDimensions: Codable, Equatable, Sendable {
     var size: CGSize { CGSize(width: width, height: height) }
 }
 
+struct LayoutBackupMetadata: Codable, Equatable, Sendable {
+    var createdAt: Date
+    var reason: String
+    var appVersion: String?
+}
+
 struct SavedCanvas: Codable, Equatable, Sendable {
     static let currentLayoutVersion = 5
 
@@ -30,6 +36,7 @@ struct SavedCanvas: Codable, Equatable, Sendable {
     var resourcePaths: [String: String] = [:]
     var canvasSize: CanvasDimensions?
     var rootResourceID: String?
+    var backupMetadata: LayoutBackupMetadata?
 
     enum CodingKeys: String, CodingKey {
         case layoutVersion
@@ -41,6 +48,7 @@ struct SavedCanvas: Codable, Equatable, Sendable {
         case resourcePaths
         case canvasSize
         case rootResourceID
+        case backupMetadata
     }
 
     init(
@@ -52,7 +60,8 @@ struct SavedCanvas: Codable, Equatable, Sendable {
         inboxIDs: Set<String> = [],
         resourcePaths: [String: String] = [:],
         canvasSize: CanvasDimensions? = nil,
-        rootResourceID: String? = nil
+        rootResourceID: String? = nil,
+        backupMetadata: LayoutBackupMetadata? = nil
     ) {
         self.layoutVersion = layoutVersion
         self.positions = positions
@@ -63,6 +72,7 @@ struct SavedCanvas: Codable, Equatable, Sendable {
         self.resourcePaths = resourcePaths
         self.canvasSize = canvasSize
         self.rootResourceID = rootResourceID
+        self.backupMetadata = backupMetadata
     }
 
     init(from decoder: Decoder) throws {
@@ -76,6 +86,20 @@ struct SavedCanvas: Codable, Equatable, Sendable {
         resourcePaths = try container.decodeIfPresent([String: String].self, forKey: .resourcePaths) ?? [:]
         canvasSize = try container.decodeIfPresent(CanvasDimensions.self, forKey: .canvasSize)
         rootResourceID = try container.decodeIfPresent(String.self, forKey: .rootResourceID)
+        backupMetadata = try container.decodeIfPresent(LayoutBackupMetadata.self, forKey: .backupMetadata)
+    }
+}
+
+struct LayoutBackupSnapshot: Identifiable, Equatable, Sendable {
+    var id: String { url.path }
+    var url: URL
+    var createdAt: Date
+    var reason: String
+    var appVersion: String?
+    var canvas: SavedCanvas
+
+    var itemCount: Int {
+        Set(canvas.positions.keys).union(canvas.inboxIDs).count
     }
 }
 
@@ -89,6 +113,7 @@ enum CanvasLayoutLoadResult: Equatable {
 enum CanvasLayoutStoreError: LocalizedError, Equatable {
     case noBackup
     case invalidImport
+    case invalidBackup
     case wrongFolder
 
     var errorDescription: String? {
@@ -97,6 +122,8 @@ enum CanvasLayoutStoreError: LocalizedError, Equatable {
             "当前空间还没有可恢复的布局备份。"
         case .invalidImport:
             "选择的文件不是有效的指针空间布局。"
+        case .invalidBackup:
+            "选择的布局备份无效或已经不存在。"
         case .wrongFolder:
             "这个布局属于另一个文件夹，不能导入当前空间。"
         }
@@ -148,7 +175,8 @@ struct CanvasLayoutStore {
             do {
                 return .loaded(try decode(at: currentURL), migratedLegacyLayout: false)
             } catch {
-                if let recovered = try newestValidBackup(canvasKey: canvasKey) {
+                if var recovered = try newestValidBackup(canvasKey: canvasKey) {
+                    recovered.backupMetadata = nil
                     let corruptCopy = try preserveCorruptLayout(at: currentURL, canvasKey: canvasKey)
                     try write(recovered, to: currentURL)
                     return .recovered(recovered, corruptCopyURL: corruptCopy)
@@ -167,18 +195,47 @@ struct CanvasLayoutStore {
         return .missing
     }
 
-    func save(_ canvas: SavedCanvas, canvasKey: String, makeBackup: Bool) throws {
+    func save(
+        _ canvas: SavedCanvas,
+        canvasKey: String,
+        makeBackup: Bool,
+        backupReason: String = "布局调整前",
+        appVersion: String? = nil
+    ) throws {
         let currentURL = layoutURL(canvasKey: canvasKey)
         try FileManager.default.createDirectory(at: layoutsDirectory, withIntermediateDirectories: true)
         if makeBackup, FileManager.default.fileExists(atPath: currentURL.path) {
-            let directory = backupDirectory(canvasKey: canvasKey)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let stamp = String(format: "%020llu", DispatchTime.now().uptimeNanoseconds)
-            let name = "\(stamp)-\(UUID().uuidString).json"
-            try FileManager.default.copyItem(at: currentURL, to: directory.appendingPathComponent(name))
-            try trimBackups(canvasKey: canvasKey)
+            try createBackup(
+                try decode(at: currentURL),
+                canvasKey: canvasKey,
+                reason: backupReason,
+                appVersion: appVersion
+            )
         }
-        try write(canvas, to: currentURL)
+        var current = canvas
+        current.backupMetadata = nil
+        try write(current, to: currentURL)
+    }
+
+    func createBackup(
+        _ canvas: SavedCanvas,
+        canvasKey: String,
+        reason: String,
+        appVersion: String? = nil
+    ) throws {
+        let directory = backupDirectory(canvasKey: canvasKey)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let now = Date()
+        var backup = canvas
+        backup.backupMetadata = LayoutBackupMetadata(
+            createdAt: now,
+            reason: reason,
+            appVersion: appVersion
+        )
+        let stamp = String(Int(now.timeIntervalSince1970 * 1_000))
+        let name = "\(stamp)-\(UUID().uuidString).json"
+        try write(backup, to: directory.appendingPathComponent(name))
+        try trimBackups(canvasKey: canvasKey)
     }
 
     func backupURLs(canvasKey: String) -> [URL] {
@@ -199,11 +256,69 @@ struct CanvasLayoutStore {
     }
 
     func restoreLatestBackup(canvasKey: String) throws -> SavedCanvas {
-        guard let latest = try newestValidBackup(canvasKey: canvasKey) else {
+        guard let latestURL = backupURLs(canvasKey: canvasKey).first,
+              let latest = try? decode(at: latestURL) else {
             throw CanvasLayoutStoreError.noBackup
         }
-        try save(latest, canvasKey: canvasKey, makeBackup: true)
-        return latest
+        try save(latest, canvasKey: canvasKey, makeBackup: true, backupReason: "恢复布局前")
+        var restored = latest
+        restored.backupMetadata = nil
+        return restored
+    }
+
+    func backupSnapshots(canvasKey: String) -> [LayoutBackupSnapshot] {
+        backupURLs(canvasKey: canvasKey).compactMap { url in
+            guard let canvas = try? decode(at: url) else { return nil }
+            let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+            let createdAt = canvas.backupMetadata?.createdAt
+                ?? values?.creationDate
+                ?? values?.contentModificationDate
+                ?? .distantPast
+            return LayoutBackupSnapshot(
+                url: url,
+                createdAt: createdAt,
+                reason: canvas.backupMetadata?.reason ?? "历史备份",
+                appVersion: canvas.backupMetadata?.appVersion,
+                canvas: canvas
+            )
+        }
+        .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func restoreBackup(
+        _ snapshot: LayoutBackupSnapshot,
+        canvasKey: String,
+        preservingAppearanceFrom current: SavedCanvas,
+        restoreAppearance: Bool,
+        appVersion: String? = nil
+    ) throws -> SavedCanvas {
+        guard snapshot.url.deletingLastPathComponent().standardizedFileURL.path
+                == backupDirectory(canvasKey: canvasKey).standardizedFileURL.path,
+              var restored = try? decode(at: snapshot.url) else {
+            throw CanvasLayoutStoreError.invalidImport
+        }
+        try save(
+            current,
+            canvasKey: canvasKey,
+            makeBackup: true,
+            backupReason: "恢复布局前",
+            appVersion: appVersion
+        )
+        restored.backupMetadata = nil
+        if !restoreAppearance {
+            restored.wallpaperPath = current.wallpaperPath
+            restored.isLocked = current.isLocked
+        }
+        return restored
+    }
+
+    func deleteBackup(_ snapshot: LayoutBackupSnapshot, canvasKey: String) throws {
+        guard snapshot.url.deletingLastPathComponent().standardizedFileURL.path
+                == backupDirectory(canvasKey: canvasKey).standardizedFileURL.path,
+              FileManager.default.fileExists(atPath: snapshot.url.path) else {
+            throw CanvasLayoutStoreError.invalidBackup
+        }
+        try FileManager.default.removeItem(at: snapshot.url)
     }
 
     func export(_ canvas: SavedCanvas, to destination: URL) throws {

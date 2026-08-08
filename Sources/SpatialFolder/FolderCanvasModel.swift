@@ -75,6 +75,13 @@ struct DesktopCollectionConfirmation: Identifiable, Equatable, Sendable {
     }
 }
 
+struct LayoutBackupDifference: Equatable, Sendable {
+    var unchangedCount: Int
+    var changedCount: Int
+    var newItemCount: Int
+    var missingItemCount: Int
+}
+
 private struct PreparedRename: Sendable {
     var destination: URL
     var replacesExisting: Bool
@@ -139,6 +146,7 @@ final class FolderCanvasModel: ObservableObject {
     @Published private(set) var fileOperationProgress: FileOperationProgressState?
     @Published var pendingConflict: PendingFileConflict?
     @Published private(set) var backupCount = 0
+    @Published private(set) var layoutBackups: [LayoutBackupSnapshot] = []
     @Published private(set) var canvasSize: CGSize
     @Published private(set) var currentDisplaySize: CGSize
     @Published var errorMessage: String?
@@ -272,6 +280,38 @@ final class FolderCanvasModel: ObservableObject {
     var canEditLayout: Bool {
         folderURL != nil && !layoutIsBlocked && !folderUnavailable && !sessionIsReadOnly &&
             !isLoadingOperationHistory && !isLocked
+    }
+
+    var undoHelpText: String {
+        nextUndoSummary.map { "撤销：\($0)" } ?? "没有可撤销的操作"
+    }
+
+    var redoHelpText: String {
+        nextRedoSummary.map { "重做：\($0)" } ?? "没有可重做的操作"
+    }
+
+    private var nextUndoSummary: String? {
+        let layout = undoStack.last
+        let file = operationRecords
+            .filter { $0.isFileReversible && $0.state == .applied }
+            .max { $0.transitionDate < $1.transitionDate }
+        if let layout, file == nil || layout.transitionDate >= file!.transitionDate {
+            return operationRecords.first(where: { $0.id == layout.operationID })?.summary
+                ?? "上一步布局调整"
+        }
+        return file?.summary
+    }
+
+    private var nextRedoSummary: String? {
+        let layout = redoStack.last
+        let file = operationRecords
+            .filter { $0.isFileReversible && $0.state == .undone }
+            .max { $0.transitionDate < $1.transitionDate }
+        if let layout, file == nil || layout.transitionDate >= file!.transitionDate {
+            return operationRecords.first(where: { $0.id == layout.operationID })?.summary
+                ?? "上一步布局调整"
+        }
+        return file?.summary
     }
 
     /// 锁定只保护图标布局；壁纸属于显示偏好，锁定时仍应允许调整。
@@ -544,7 +584,7 @@ final class FolderCanvasModel: ObservableObject {
         guard canEditLayout, !inboxIDs.contains(item.id) else { return }
         captureUndoSnapshot(summary: "移动图标")
         positions[item.id] = snapped(point, scale: scale(for: item))
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "移动图标前")
     }
 
     func scale(for item: FolderItem) -> CGFloat {
@@ -567,7 +607,7 @@ final class FolderCanvasModel: ObservableObject {
                 positions[item.id] = snapped(CGPoint(x: position.x, y: position.y), scale: adjustedScale)
             }
         }
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "调整图标大小前")
     }
 
     // MARK: - 选择、框选和整体拖动
@@ -646,7 +686,7 @@ final class FolderCanvasModel: ObservableObject {
         }
         dragTranslation = .zero
         draggingIDs = []
-        if moved { persist(makeBackup: true) }
+        if moved { persist(makeBackup: true, backupReason: "移动所选图标前") }
     }
 
     /// 先把位移吸附到网格，再按整个选择集合的外接边界统一限位。
@@ -682,7 +722,7 @@ final class FolderCanvasModel: ObservableObject {
         guard isLocked != locked else { return }
         captureUndoSnapshot(summary: locked ? "锁定画布" : "解锁画布")
         isLocked = locked
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: locked ? "锁定画布前" : "解锁画布前")
     }
 
     func toggleLocked() { setLocked(!isLocked) }
@@ -701,7 +741,7 @@ final class FolderCanvasModel: ObservableObject {
             positions.removeValue(forKey: item.id)
             selectedIDs.remove(item.id)
         }
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "移入待放置区前")
     }
 
     func placeFromInbox(_ item: FolderItem) {
@@ -740,7 +780,7 @@ final class FolderCanvasModel: ObservableObject {
             inboxIDs.remove(item.id)
             positions[item.id] = point
         }
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "从待放置区取出前")
         if placements.count < targets.count {
             errorMessage = "主画布空间不足，已放入 \(placements.count) 个项目，其余仍保留在待放置区。"
         }
@@ -770,7 +810,7 @@ final class FolderCanvasModel: ObservableObject {
             updateUndoAvailability()
             errorMessage = "当前没有越界项目。"
         } else {
-            persist(makeBackup: true)
+            persist(makeBackup: true, backupReason: "找回越界项目前")
         }
     }
 
@@ -790,7 +830,7 @@ final class FolderCanvasModel: ObservableObject {
         captureUndoSnapshot(summary: "重设基准画布")
         resizeLogicalCanvas(to: currentDisplaySize)
         _ = enforceCapacityAndBounds(items)
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "重设基准画布前")
     }
 
     func undoLayoutChange() {
@@ -804,7 +844,7 @@ final class FolderCanvasModel: ObservableObject {
         ))
         applySavedCanvas(previous.canvas)
         reconcileAfterLayoutRestore()
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "撤销布局前")
         setOperationState(id: previous.operationID, state: .undone, transitionDate: now)
         updateUndoAvailability()
     }
@@ -820,7 +860,7 @@ final class FolderCanvasModel: ObservableObject {
         ))
         applySavedCanvas(next.canvas)
         reconcileAfterLayoutRestore()
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "重做布局前")
         setOperationState(id: next.operationID, state: .applied, transitionDate: now)
         updateUndoAvailability()
     }
@@ -866,7 +906,7 @@ final class FolderCanvasModel: ObservableObject {
         scales = [:]
         inboxIDs = []
         arrangeInitialItems(items)
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "重置布局前")
     }
 
     func restoreLatestBackup() {
@@ -882,6 +922,121 @@ final class FolderCanvasModel: ObservableObject {
         } catch {
             errorMessage = "无法恢复布局：\(error.localizedDescription)"
         }
+    }
+
+    func loadLayoutBackups() {
+        guard let canvasKey else {
+            layoutBackups = []
+            return
+        }
+        layoutBackups = layoutStore.backupSnapshots(canvasKey: canvasKey)
+        backupCount = layoutBackups.count
+    }
+
+    func saveLayoutSnapshot(note: String?) {
+        guard !sessionIsReadOnly, !layoutIsBlocked, let canvasKey else { return }
+        syncSavedCanvas()
+        let snapshotCanvas = canvasLimitedToCurrentItems(savedCanvas)
+        let trimmed = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let reason = trimmed.isEmpty ? "手动保存的布局" : trimmed
+        do {
+            try layoutStore.createBackup(
+                snapshotCanvas,
+                canvasKey: canvasKey,
+                reason: reason,
+                appVersion: currentAppVersion
+            )
+            loadLayoutBackups()
+            errorMessage = "已经保存当前布局快照。"
+        } catch {
+            errorMessage = "无法保存布局快照：\(error.localizedDescription)"
+        }
+    }
+
+    func restoreLayoutBackup(_ snapshot: LayoutBackupSnapshot, restoreAppearance: Bool) {
+        guard !sessionIsReadOnly, !isLoadingOperationHistory, let canvasKey else { return }
+        do {
+            syncSavedCanvas()
+            if !layoutIsBlocked { captureUndoSnapshot(summary: "恢复布局备份") }
+            var restored = try layoutStore.restoreBackup(
+                snapshot,
+                canvasKey: canvasKey,
+                preservingAppearanceFrom: savedCanvas,
+                restoreAppearance: restoreAppearance,
+                appVersion: currentAppVersion
+            )
+            restored = preservingCurrentOnlyItems(in: restored, current: savedCanvas)
+            layoutIsBlocked = false
+            applySavedCanvas(restored)
+            reconcileAfterLayoutRestore()
+            persist(makeBackup: false)
+            loadLayoutBackups()
+            errorMessage = "已经恢复所选布局备份。真实文件没有改变。"
+        } catch {
+            errorMessage = "无法恢复布局：\(error.localizedDescription)"
+        }
+    }
+
+    func deleteLayoutBackup(_ snapshot: LayoutBackupSnapshot) {
+        guard !sessionIsReadOnly, let canvasKey else { return }
+        do {
+            try layoutStore.deleteBackup(snapshot, canvasKey: canvasKey)
+            loadLayoutBackups()
+            errorMessage = "已经删除所选布局备份。当前布局和真实文件没有改变。"
+        } catch {
+            errorMessage = "无法删除布局备份：\(error.localizedDescription)"
+        }
+    }
+
+    func canvasForBackupPreview(_ snapshot: LayoutBackupSnapshot) -> SavedCanvas {
+        remappingBackupCanvasToCurrentItems(snapshot.canvas)
+    }
+
+    var currentCanvasForPreview: SavedCanvas {
+        let currentIDs = Set(items.map(\.id))
+        return SavedCanvas(
+            positions: positions.filter { currentIDs.contains($0.key) },
+            scales: scales.filter { currentIDs.contains($0.key) },
+            wallpaperPath: wallpaperURL?.path,
+            isLocked: isLocked,
+            inboxIDs: inboxIDs.intersection(currentIDs),
+            resourcePaths: savedCanvas.resourcePaths,
+            canvasSize: CanvasDimensions(canvasSize),
+            rootResourceID: rootResourceID
+        )
+    }
+
+    func layoutDifference(for snapshot: LayoutBackupSnapshot) -> LayoutBackupDifference {
+        let backup = canvasForBackupPreview(snapshot)
+        let currentIDs = Set(items.map(\.id))
+        let backupIDs = Set(backup.positions.keys).union(backup.inboxIDs)
+        let shared = currentIDs.intersection(backupIDs)
+        var changed = 0
+        for id in shared {
+            let currentScale = scales[id] ?? defaultIconScale
+            let backupScale = backup.scales[id] ?? defaultIconScale
+            if positions[id] != backup.positions[id]
+                || inboxIDs.contains(id) != backup.inboxIDs.contains(id)
+                || abs(currentScale - backupScale) > 0.001 {
+                changed += 1
+            }
+        }
+        return LayoutBackupDifference(
+            unchangedCount: shared.count - changed,
+            changedCount: changed,
+            newItemCount: currentIDs.subtracting(backupIDs).count,
+            missingItemCount: backupIDs.subtracting(currentIDs).count
+        )
+    }
+
+    func missingItemNames(for snapshot: LayoutBackupSnapshot) -> [String] {
+        let backup = canvasForBackupPreview(snapshot)
+        let currentIDs = Set(items.map(\.id))
+        return Set(backup.positions.keys)
+            .union(backup.inboxIDs)
+            .subtracting(currentIDs)
+            .map { URL(fileURLWithPath: $0).lastPathComponent }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     func revealBackups() {
@@ -1014,7 +1169,7 @@ final class FolderCanvasModel: ObservableObject {
         layoutIsBlocked = false
         applySavedCanvas(imported)
         reconcileAfterLayoutRestore()
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "导入布局前")
     }
 
     func chooseReplacementFolder() {
@@ -1043,7 +1198,7 @@ final class FolderCanvasModel: ObservableObject {
         layoutIsBlocked = false
         applySavedCanvas(transferred)
         reconcileAfterLayoutRestore()
-        persist(makeBackup: true)
+        persist(makeBackup: true, backupReason: "重新关联空间前")
     }
 
     private func remappedCanvas(
@@ -1923,7 +2078,7 @@ final class FolderCanvasModel: ObservableObject {
                 inboxIDs.remove(item.id)
                 selectedIDs.remove(item.id)
             }
-            persist(makeBackup: true)
+            persist(makeBackup: true, backupReason: "移至废纸篓前")
             refreshItems()
         } catch {
             record.detail = error.localizedDescription
@@ -2453,6 +2608,7 @@ final class FolderCanvasModel: ObservableObject {
 
     private func applySavedCanvas(_ canvas: SavedCanvas) {
         savedCanvas = canvas
+        savedCanvas.backupMetadata = nil
         positions = canvas.positions
         scales = canvas.scales
         wallpaperURL = canvas.wallpaperPath.map(URL.init(fileURLWithPath:))
@@ -2475,11 +2631,17 @@ final class FolderCanvasModel: ObservableObject {
         savedCanvas.rootResourceID = rootResourceID
     }
 
-    private func persist(makeBackup: Bool) {
+    private func persist(makeBackup: Bool, backupReason: String = "布局调整前") {
         guard !layoutIsBlocked, !sessionIsReadOnly, let canvasKey else { return }
         syncSavedCanvas()
         do {
-            try layoutStore.save(savedCanvas, canvasKey: canvasKey, makeBackup: makeBackup)
+            try layoutStore.save(
+                savedCanvas,
+                canvasKey: canvasKey,
+                makeBackup: makeBackup,
+                backupReason: backupReason,
+                appVersion: currentAppVersion
+            )
             updateBackupCount()
         } catch {
             errorMessage = "无法保存画布布局：\(error.localizedDescription)"
@@ -2854,6 +3016,44 @@ final class FolderCanvasModel: ObservableObject {
         backupCount = layoutStore.backupURLs(canvasKey: canvasKey).count
     }
 
+    private var currentAppVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
+
+    private func remappingBackupCanvasToCurrentItems(_ original: SavedCanvas) -> SavedCanvas {
+        var canvas = original
+        for item in items {
+            guard let resourceID = item.resourceID,
+                  let oldID = original.resourcePaths[resourceID],
+                  oldID != item.id else { continue }
+            if let point = canvas.positions.removeValue(forKey: oldID) {
+                canvas.positions[item.id] = point
+            }
+            if let scale = canvas.scales.removeValue(forKey: oldID) {
+                canvas.scales[item.id] = scale
+            }
+            if canvas.inboxIDs.remove(oldID) != nil {
+                canvas.inboxIDs.insert(item.id)
+            }
+        }
+        return canvas
+    }
+
+    private func preservingCurrentOnlyItems(in backup: SavedCanvas, current: SavedCanvas) -> SavedCanvas {
+        var merged = backup
+        let currentIDs = Set(items.map(\.id))
+        let backupIDs = Set(backup.positions.keys).union(backup.inboxIDs)
+        for id in currentIDs.subtracting(backupIDs) {
+            if let point = current.positions[id] { merged.positions[id] = point }
+            if let scale = current.scales[id] { merged.scales[id] = scale }
+            if current.inboxIDs.contains(id) { merged.inboxIDs.insert(id) }
+        }
+        for (resourceID, path) in current.resourcePaths where merged.resourcePaths[resourceID] == nil {
+            merged.resourcePaths[resourceID] = path
+        }
+        return merged
+    }
+
     private func reconcileAfterLayoutRestore() {
         _ = reconcileResourcePaths(items)
         _ = assignPositionsToNewItems(items)
@@ -2874,6 +3074,16 @@ final class FolderCanvasModel: ObservableObject {
             }
         }
         return changed
+    }
+
+    private func canvasLimitedToCurrentItems(_ original: SavedCanvas) -> SavedCanvas {
+        let currentPaths = Set(items.map(\.id))
+        var canvas = original
+        canvas.positions = original.positions.filter { currentPaths.contains($0.key) }
+        canvas.scales = original.scales.filter { currentPaths.contains($0.key) }
+        canvas.inboxIDs.formIntersection(currentPaths)
+        canvas.resourcePaths = original.resourcePaths.filter { currentPaths.contains($0.value) }
+        return canvas
     }
 
     private func transferLayout(from oldID: String, to newID: String) {
