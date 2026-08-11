@@ -16,6 +16,7 @@ SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" \
     -module-cache-path "$CACHE" \
     -parse-as-library \
     "$ROOT/Sources/SpatialFolder/CanvasLayoutStore.swift" \
+    "$ROOT/Sources/SpatialFolder/FileOperationAuthorization.swift" \
     "$ROOT/Sources/SpatialFolder/FolderScanService.swift" \
     "$ROOT/Sources/SpatialFolder/OperationHistoryStore.swift" \
     "$ROOT/Sources/SpatialFolder/OperationJournalStore.swift" \

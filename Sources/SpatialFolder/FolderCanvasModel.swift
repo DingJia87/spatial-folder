@@ -1408,6 +1408,16 @@ final class FolderCanvasModel: ObservableObject {
             }
             return TagAction(path: item.url.path, before: item.tags, after: tags)
         }
+        guard let folderURL else { return }
+        do {
+            try FileOperationPathValidator.validateSources(
+                tagActions.map { URL(fileURLWithPath: $0.path) },
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         if fileOperationsAsynchronously {
             guard let record = beginFileOperation(
                 kind: .tags,
@@ -1447,6 +1457,16 @@ final class FolderCanvasModel: ObservableObject {
         let targets = currentItems(for: targetItems).filter { !$0.tags.isEmpty }
         guard realFileMutationsAllowed(), !targets.isEmpty else { return }
         let tagActions = targets.map { TagAction(path: $0.url.path, before: $0.tags, after: []) }
+        guard let folderURL else { return }
+        do {
+            try FileOperationPathValidator.validateSources(
+                tagActions.map { URL(fileURLWithPath: $0.path) },
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         if fileOperationsAsynchronously {
             guard let record = beginFileOperation(
                 kind: .tags,
@@ -1525,7 +1545,12 @@ final class FolderCanvasModel: ObservableObject {
                         summary: "制作 \(names.count) 个项目的副本",
                         itemNames: names
                     ) else { return }
-                    self.startCoordinatedTransfers(recordID: record.id, title: "制作副本", plans: plans)
+                    self.startCoordinatedTransfers(
+                        recordID: record.id,
+                        title: "制作副本",
+                        plans: plans,
+                        sourceMustBeInCurrentFolder: true
+                    )
                 case let .failure(error):
                     self.errorMessage = "无法准备副本目标：\(error.localizedDescription)"
                 }
@@ -1546,6 +1571,17 @@ final class FolderCanvasModel: ObservableObject {
                 move: false,
                 replacesExistingDestination: false
             )
+        }
+        guard let folderURL else { return }
+        do {
+            try FileOperationPathValidator.validateTransferPlans(
+                plans,
+                authorization: FileOperationAuthorizationContext(folder: folderURL),
+                sourceScope: .currentFolderOnly
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
         }
         guard var record = beginFileOperation(
             kind: .duplicate,
@@ -1693,31 +1729,61 @@ final class FolderCanvasModel: ObservableObject {
             return
         }
         let policy = conflictChoice ?? .cancel
+        var reservedPaths = Set<String>()
+        let plans = sources.map { source -> FileTransferPlan in
+            var destination = folderURL.appendingPathComponent(source.lastPathComponent)
+            let collidesWithBatch = reservedPaths.contains(destination.path)
+            let existsBeforeBatch = FileManager.default.fileExists(atPath: destination.path)
+            var replacesExisting = false
+            if collidesWithBatch || (existsBeforeBatch && policy == .keepBoth) {
+                destination = uniqueDestination(for: source, in: folderURL, excluding: reservedPaths)
+            } else if existsBeforeBatch && policy == .replace {
+                replacesExisting = true
+            }
+            reservedPaths.insert(destination.path)
+            return FileTransferPlan(
+                source: source,
+                destination: destination,
+                move: move,
+                replacesExistingDestination: replacesExisting
+            )
+        }
+        do {
+            try FileOperationPathValidator.validateTransferPlans(
+                plans,
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         guard var record = beginFileOperation(
             kind: move ? .moveItems : .copyItems,
             summary: move ? "移动 \(sources.count) 个项目到空间" : "复制 \(sources.count) 个项目到空间",
             itemNames: sources.map(\.lastPathComponent)
         ) else { return }
         do {
-            for source in sources {
-                var target = folderURL.appendingPathComponent(source.lastPathComponent)
-                if FileManager.default.fileExists(atPath: target.path) {
-                    if policy == .keepBoth {
-                        target = uniqueDestination(for: source, in: folderURL)
-                    } else if policy == .replace {
-                        let trashURL = try trashItemRecordingResult(at: target)
-                        record.actions.append(.discard(DiscardAction(originalPath: target.path, trashPath: trashURL.path)))
-                        replaceOperationRecord(record)
-                    } else {
-                        throw FileOperationTransitionError.cancelled
-                    }
+            for plan in plans {
+                if plan.replacesExistingDestination,
+                   FileManager.default.fileExists(atPath: plan.destination.path) {
+                    let trashURL = try trashItemRecordingResult(at: plan.destination)
+                    record.actions.append(.discard(DiscardAction(
+                        originalPath: plan.destination.path,
+                        trashPath: trashURL.path
+                    )))
+                    replaceOperationRecord(record)
                 }
-                if move {
-                    try FileManager.default.moveItem(at: source, to: target)
-                    record.actions.append(.relocate(RelocateAction(originalPath: source.path, destinationPath: target.path)))
+                if plan.move {
+                    try FileManager.default.moveItem(at: plan.source, to: plan.destination)
+                    record.actions.append(.relocate(RelocateAction(
+                        originalPath: plan.source.path,
+                        destinationPath: plan.destination.path
+                    )))
                 } else {
-                    try FileManager.default.copyItem(at: source, to: target)
-                    record.actions.append(.materialize(MaterializeAction(destinationPath: target.path)))
+                    try FileManager.default.copyItem(at: plan.source, to: plan.destination)
+                    record.actions.append(.materialize(MaterializeAction(
+                        destinationPath: plan.destination.path
+                    )))
                 }
                 replaceOperationRecord(record)
             }
@@ -1874,8 +1940,20 @@ final class FolderCanvasModel: ObservableObject {
     private func startCoordinatedTransfers(
         recordID: UUID,
         title: String,
-        plans: [FileTransferPlan]
+        plans: [FileTransferPlan],
+        sourceMustBeInCurrentFolder: Bool = false
     ) {
+        guard let folderURL else {
+            finishCoordinatedOperation(
+                recordID: recordID,
+                unexpectedError: FileOperationSafetyError.destinationOutsideAuthorizedFolder
+            )
+            return
+        }
+        let authorization = FileOperationAuthorizationContext(folder: folderURL)
+        let sourceScope: FileTransferSourceScope = sourceMustBeInCurrentFolder
+            ? .currentFolderOnly
+            : .externalAllowed
         let total = plans.reduce(0) { $0 + ($1.replacesExistingDestination ? 2 : 1) }
         fileOperationProgress = FileOperationProgressState(
             id: recordID,
@@ -1891,7 +1969,11 @@ final class FolderCanvasModel: ObservableObject {
             do {
                 guard let self else { throw CancellationError() }
                 try await self.waitForOperationJournal()
-                let actions = try await coordinator.performTransfers(plans) { [weak self] event in
+                let actions = try await coordinator.performTransfers(
+                    plans,
+                    authorization: authorization,
+                    sourceScope: sourceScope
+                ) { [weak self] event in
                     guard let self else { throw CancellationError() }
                     try await self.applyCoordinatorEvent(event, recordID: recordID)
                 }
@@ -1909,6 +1991,14 @@ final class FolderCanvasModel: ObservableObject {
         title: String,
         plans: [FileCompressionPlan]
     ) {
+        guard let folderURL else {
+            finishCoordinatedOperation(
+                recordID: recordID,
+                unexpectedError: FileOperationSafetyError.destinationOutsideAuthorizedFolder
+            )
+            return
+        }
+        let authorization = FileOperationAuthorizationContext(folder: folderURL)
         fileOperationProgress = FileOperationProgressState(
             id: recordID,
             title: title,
@@ -1923,7 +2013,10 @@ final class FolderCanvasModel: ObservableObject {
             do {
                 guard let self else { throw CancellationError() }
                 try await self.waitForOperationJournal()
-                let actions = try await coordinator.performCompressions(plans) { [weak self] event in
+                let actions = try await coordinator.performCompressions(
+                    plans,
+                    authorization: authorization
+                ) { [weak self] event in
                     guard let self else { throw CancellationError() }
                     try await self.applyCoordinatorEvent(event, recordID: recordID)
                 }
@@ -1941,6 +2034,14 @@ final class FolderCanvasModel: ObservableObject {
         title: String,
         urls: [URL]
     ) {
+        guard let folderURL else {
+            finishCoordinatedOperation(
+                recordID: recordID,
+                unexpectedError: FileOperationSafetyError.sourceOutsideAuthorizedFolder
+            )
+            return
+        }
+        let authorization = FileOperationAuthorizationContext(folder: folderURL)
         fileOperationProgress = FileOperationProgressState(
             id: recordID,
             title: title,
@@ -1955,7 +2056,10 @@ final class FolderCanvasModel: ObservableObject {
             do {
                 guard let self else { throw CancellationError() }
                 try await self.waitForOperationJournal()
-                let actions = try await coordinator.performTrash(urls) { [weak self] event in
+                let actions = try await coordinator.performTrash(
+                    urls,
+                    authorization: authorization
+                ) { [weak self] event in
                     guard let self else { throw CancellationError() }
                     try await self.applyCoordinatorEvent(event, recordID: recordID)
                 }
@@ -1969,6 +2073,14 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func startCoordinatedCreate(recordID: UUID, title: String, destination: URL) {
+        guard let folderURL else {
+            finishCoordinatedOperation(
+                recordID: recordID,
+                unexpectedError: FileOperationSafetyError.destinationOutsideAuthorizedFolder
+            )
+            return
+        }
+        let authorization = FileOperationAuthorizationContext(folder: folderURL)
         fileOperationProgress = FileOperationProgressState(
             id: recordID,
             title: title,
@@ -1983,7 +2095,10 @@ final class FolderCanvasModel: ObservableObject {
             do {
                 guard let self else { throw CancellationError() }
                 try await self.waitForOperationJournal()
-                let actions = try await coordinator.createDirectory(at: destination) { [weak self] event in
+                let actions = try await coordinator.createDirectory(
+                    at: destination,
+                    authorization: authorization
+                ) { [weak self] event in
                     guard let self else { throw CancellationError() }
                     try await self.applyCoordinatorEvent(event, recordID: recordID)
                 }
@@ -1997,6 +2112,14 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func startCoordinatedTags(recordID: UUID, title: String, actions: [TagAction]) {
+        guard let folderURL else {
+            finishCoordinatedOperation(
+                recordID: recordID,
+                unexpectedError: FileOperationSafetyError.sourceOutsideAuthorizedFolder
+            )
+            return
+        }
+        let authorization = FileOperationAuthorizationContext(folder: folderURL)
         fileOperationProgress = FileOperationProgressState(
             id: recordID,
             title: title,
@@ -2011,7 +2134,10 @@ final class FolderCanvasModel: ObservableObject {
             do {
                 guard let self else { throw CancellationError() }
                 try await self.waitForOperationJournal()
-                let completed = try await coordinator.applyTags(actions) { [weak self] event in
+                let completed = try await coordinator.applyTags(
+                    actions,
+                    authorization: authorization
+                ) { [weak self] event in
                     guard let self else { throw CancellationError() }
                     try await self.applyCoordinatorEvent(event, recordID: recordID)
                 }
@@ -2155,6 +2281,16 @@ final class FolderCanvasModel: ObservableObject {
 
     func trash(_ targetItems: [FolderItem]) {
         guard realFileMutationsAllowed(), !targetItems.isEmpty else { return }
+        guard let folderURL else { return }
+        do {
+            try FileOperationPathValidator.validateSources(
+                targetItems.map(\.url),
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         let canvasItems = targetItems.enumerated().map { index, item in
             canvasMetadata(for: item.id, actionIndex: index)
         }
@@ -2235,6 +2371,15 @@ final class FolderCanvasModel: ObservableObject {
             suffix += 1
         }
         let destination = folderURL.appendingPathComponent(name)
+        do {
+            try FileOperationPathValidator.validateDestinations(
+                [destination],
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         guard var record = beginFileOperation(
             kind: .createFolder,
             summary: "新建“\(name)”",
@@ -2271,10 +2416,23 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     func rename(_ item: FolderItem, to name: String, conflictChoice: ConflictChoice? = nil) {
-        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanName.isEmpty, realFileMutationsAllowed() else { return }
-        var newURL = item.url.deletingLastPathComponent().appendingPathComponent(cleanName)
-        guard newURL != item.url else { return }
+        guard let folderURL else { return }
+        let cleanName: String
+        var newURL: URL
+        do {
+            let validated = try FileOperationPathValidator.renameDestination(
+                for: item.url,
+                name: name,
+                in: folderURL
+            )
+            cleanName = validated.name
+            newURL = validated.destination
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        guard realFileMutationsAllowed() else { return }
+        guard newURL != item.url.standardizedFileURL else { return }
         if fileOperationsAsynchronously {
             let repository = folderAccessRepository
             let requestedURL = newURL
@@ -2321,7 +2479,8 @@ final class FolderCanvasModel: ObservableObject {
                             destination: prepared.destination,
                             move: true,
                             replacesExistingDestination: prepared.replacesExisting
-                        )]
+                        )],
+                        sourceMustBeInCurrentFolder: true
                     )
                 case let .failure(error):
                     self.errorMessage = "无法准备重命名：\(error.localizedDescription)"
@@ -2440,8 +2599,16 @@ final class FolderCanvasModel: ObservableObject {
             return
         }
         do {
+            guard let folderURL else {
+                throw FileOperationSafetyError.destinationOutsideAuthorizedFolder
+            }
             record.state = .applied
-            record = try fileOperationEngine.transition(record, to: .undone, conflictChoice: .replace)
+            record = try fileOperationEngine.transition(
+                record,
+                to: .undone,
+                conflictChoice: .replace,
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
+            )
             record.state = .failed
             record.detail = originalDetail ?? "操作失败，已回滚完成的文件变更。"
         } catch {
@@ -2468,6 +2635,7 @@ final class FolderCanvasModel: ObservableObject {
         conflictChoice: ConflictChoice
     ) {
         guard realFileMutationsAllowed(),
+              let folderURL,
               let record = operationRecords.first(where: { $0.id == id }) else { return }
         if fileOperationsAsynchronously {
             startCoordinatedTransition(
@@ -2481,7 +2649,8 @@ final class FolderCanvasModel: ObservableObject {
             let updated = try fileOperationEngine.transition(
                 record,
                 to: targetState,
-                conflictChoice: conflictChoice
+                conflictChoice: conflictChoice,
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
             )
             applyCanvasMetadata(from: record, updated: updated, targetState: targetState)
             replaceOperationRecord(updated)
@@ -2506,6 +2675,11 @@ final class FolderCanvasModel: ObservableObject {
         targetState: OperationState,
         conflictChoice: ConflictChoice
     ) {
+        guard let folderURL else {
+            errorMessage = FileOperationSafetyError.destinationOutsideAuthorizedFolder.localizedDescription
+            return
+        }
+        let authorization = FileOperationAuthorizationContext(folder: folderURL)
         var transitioning = record
         transitioning.state = targetState == .undone ? .undoing : .redoing
         transitioning.transitionDate = Date()
@@ -2529,7 +2703,8 @@ final class FolderCanvasModel: ObservableObject {
                 let updated = try await coordinator.transition(
                     record: record,
                     to: targetState,
-                    conflictChoice: conflictChoice
+                    conflictChoice: conflictChoice,
+                    authorization: authorization
                 ) { [weak self] event in
                     guard let self else { throw CancellationError() }
                     try await self.applyCoordinatorEvent(event, recordID: record.id)
@@ -2675,7 +2850,13 @@ final class FolderCanvasModel: ObservableObject {
     }
 
     private func trashItemRecordingResult(at url: URL) throws -> URL {
-        try fileOperationEngine.moveToTrash(url)
+        guard let folderURL else {
+            throw FileOperationSafetyError.sourceOutsideAuthorizedFolder
+        }
+        return try fileOperationEngine.moveToTrash(
+            url,
+            authorization: FileOperationAuthorizationContext(folder: folderURL)
+        )
     }
 
     // MARK: - 布局与操作历史持久化
@@ -3664,6 +3845,15 @@ final class FolderCanvasModel: ObservableObject {
         while FileManager.default.fileExists(atPath: targetURL.path) {
             index += 1
             targetURL = folderURL.appendingPathComponent("\(baseName) \(index).\(fileExtension)")
+        }
+        do {
+            try FileOperationPathValidator.validateDestinations(
+                [targetURL],
+                authorization: FileOperationAuthorizationContext(folder: folderURL)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            return
         }
         guard var record = beginFileOperation(
             kind: .createDocument,

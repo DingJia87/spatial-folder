@@ -1,5 +1,75 @@
 import Foundation
 
+enum FileTransferSourceScope: Equatable, Sendable {
+    case externalAllowed
+    case currentFolderOnly
+}
+
+/// 真实文件操作的最后一道边界检查。不解析符号链接，因为画布允许操作作为
+/// 当前文件夹直接子项存在的符号链接本身，而不是它指向的外部目标。
+extension FileOperationPathValidator {
+    static func validatedItemName(_ rawName: String) throws -> String {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name != ".",
+              name != "..",
+              !name.contains("/"),
+              !name.unicodeScalars.contains(where: { $0.value == 0 })
+        else {
+            throw FileOperationSafetyError.invalidItemName
+        }
+        return name
+    }
+
+    static func renameDestination(
+        for itemURL: URL,
+        name rawName: String,
+        in authorizedFolder: URL
+    ) throws -> (name: String, destination: URL) {
+        let requestedFolder = authorizedFolder.standardizedFileURL
+        let folder = requestedFolder.resolvingSymlinksInPath()
+        let source = itemURL.standardizedFileURL
+        guard source.deletingLastPathComponent().resolvingSymlinksInPath() == folder else {
+            throw FileOperationSafetyError.sourceOutsideAuthorizedFolder
+        }
+
+        let name = try validatedItemName(rawName)
+        let destination = requestedFolder.appendingPathComponent(name).standardizedFileURL
+        guard destination.deletingLastPathComponent().resolvingSymlinksInPath() == folder
+        else {
+            throw FileOperationSafetyError.destinationOutsideAuthorizedFolder
+        }
+        return (name, destination)
+    }
+
+    static func validateTransferPlans(
+        _ plans: [FileTransferPlan],
+        authorization: FileOperationAuthorizationContext,
+        sourceScope: FileTransferSourceScope = .externalAllowed
+    ) throws {
+        let destinationFolder = authorization.folder
+        for plan in plans {
+            guard isDirectChild(plan.destination, of: destinationFolder) else {
+                throw FileOperationSafetyError.destinationOutsideAuthorizedFolder
+            }
+            if sourceScope == .currentFolderOnly {
+                guard isDirectChild(plan.source, of: destinationFolder) else {
+                    throw FileOperationSafetyError.sourceOutsideAuthorizedFolder
+                }
+            }
+        }
+    }
+
+    static func validateCompressionPlans(
+        _ plans: [FileCompressionPlan],
+        authorization: FileOperationAuthorizationContext
+    ) throws {
+        try validateSources(plans.map(\.source), authorization: authorization)
+        try validateDestinations(plans.map(\.destination), authorization: authorization)
+    }
+
+}
+
 struct FileInfoSnapshot: Equatable, Sendable {
     var size: Int64
     var modificationDate: Date?

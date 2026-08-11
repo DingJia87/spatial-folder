@@ -340,7 +340,10 @@ struct SpatialFolderTests {
         do {
             _ = try await FileOperationCoordinator(fileOperationEngine: FileOperationEngine(
                 trashDirectoryForTesting: trash
-            )).performTransfers(plans) { _ in }
+            )).performTransfers(
+                plans,
+                authorization: FileOperationAuthorizationContext(folder: target)
+            ) { _ in }
             Issue.record("缺失来源没有触发失败")
         } catch let failure as CoordinatedFileOperationFailure {
             #expect(failure.rollbackSucceeded)
@@ -348,6 +351,236 @@ struct SpatialFolderTests {
                 atPath: target.appendingPathComponent("valid.txt").path
             ))
         }
+    }
+
+    @Test("重命名拒绝路径穿越与伪目录名")
+    func testRenamePathValidation() throws {
+        let root = temporaryDirectory("RenameSafety")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Space", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let item = folder.appendingPathComponent("report.txt")
+        try Data("safe".utf8).write(to: item)
+
+        for unsafeName in ["../escaped.txt", ".", "..", "sub/name", "bad\u{0}name"] {
+            #expect(throws: FileOperationSafetyError.self) {
+                _ = try FileOperationPathValidator.renameDestination(
+                    for: item,
+                    name: unsafeName,
+                    in: folder
+                )
+            }
+        }
+
+        let validated = try FileOperationPathValidator.renameDestination(
+            for: item,
+            name: "  安全名称.txt  ",
+            in: folder
+        )
+        #expect(validated.name == "安全名称.txt")
+        #expect(validated.destination == folder.appendingPathComponent("安全名称.txt"))
+    }
+
+    @Test("批量替换在任何变更前拒绝越界目标")
+    func testCoordinatedTransferRejectsEscapedDestinationBeforeMutation() async throws {
+        let root = temporaryDirectory("TransferSafety")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceFolder = root.appendingPathComponent("Source", isDirectory: true)
+        let destinationFolder = root.appendingPathComponent("Destination", isDirectory: true)
+        let trash = root.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let source = sourceFolder.appendingPathComponent("new.txt")
+        let escaped = root.appendingPathComponent("protected.txt")
+        try Data("new".utf8).write(to: source)
+        try Data("protected".utf8).write(to: escaped)
+
+        let plan = FileTransferPlan(
+            source: source,
+            destination: destinationFolder.appendingPathComponent("../protected.txt"),
+            move: true,
+            replacesExistingDestination: true
+        )
+        do {
+            _ = try await FileOperationCoordinator(fileOperationEngine: FileOperationEngine(
+                trashDirectoryForTesting: trash
+            )).performTransfers(
+                [plan],
+                authorization: FileOperationAuthorizationContext(folder: destinationFolder)
+            ) { _ in }
+            Issue.record("越界替换计划没有被拒绝")
+        } catch let failure as CoordinatedFileOperationFailure {
+            #expect(failure.rollbackSucceeded)
+            #expect(failure.actions.isEmpty)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        #expect(try String(contentsOf: escaped, encoding: .utf8) == "protected")
+        #expect(!FileManager.default.fileExists(atPath: trash.path))
+    }
+
+    @Test("压缩、废纸篓、新建、标签和重做共用写入边界")
+    func testUnifiedWriteAuthorizationRejectsEveryEscapedPath() async throws {
+        let root = temporaryDirectory("UnifiedAuthorization")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Space", isDirectory: true)
+        let outside = root.appendingPathComponent("Outside", isDirectory: true)
+        let trash = root.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let protected = outside.appendingPathComponent("protected.txt")
+        try Data("protected".utf8).write(to: protected)
+        let authorization = FileOperationAuthorizationContext(folder: folder)
+        let engine = FileOperationEngine(trashDirectoryForTesting: trash)
+        let coordinator = FileOperationCoordinator(fileOperationEngine: engine)
+
+        do {
+            _ = try await coordinator.performCompressions(
+                [FileCompressionPlan(
+                    source: protected,
+                    destination: folder.appendingPathComponent("protected.zip")
+                )],
+                authorization: authorization
+            ) { _ in }
+            Issue.record("压缩错误接受了外部来源")
+        } catch let failure as CoordinatedFileOperationFailure {
+            #expect(failure.actions.isEmpty)
+        }
+
+        do {
+            _ = try await coordinator.performTrash(
+                [protected],
+                authorization: authorization
+            ) { _ in }
+            Issue.record("废纸篓错误接受了外部项目")
+        } catch let failure as CoordinatedFileOperationFailure {
+            #expect(failure.actions.isEmpty)
+        }
+
+        let escapedDirectory = outside.appendingPathComponent("escaped-directory", isDirectory: true)
+        do {
+            _ = try await coordinator.createDirectory(
+                at: escapedDirectory,
+                authorization: authorization
+            ) { _ in }
+            Issue.record("新建文件夹错误接受了外部目标")
+        } catch let failure as CoordinatedFileOperationFailure {
+            #expect(failure.actions.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: escapedDirectory.path))
+        }
+
+        do {
+            _ = try await coordinator.applyTags(
+                [TagAction(path: protected.path, before: [], after: ["红色\n6"])],
+                authorization: authorization
+            ) { _ in }
+            Issue.record("标签写入错误接受了外部项目")
+        } catch let failure as CoordinatedFileOperationFailure {
+            #expect(failure.actions.isEmpty)
+        }
+
+        let restored = folder.appendingPathComponent("restored.txt")
+        let corruptedRecord = OperationRecord(
+            category: .file,
+            kind: .createDocument,
+            summary: "损坏的重做记录",
+            state: .undone,
+            actions: [.materialize(MaterializeAction(
+                destinationPath: restored.path,
+                undoTrashPath: protected.path
+            ))]
+        )
+        do {
+            _ = try engine.transition(
+                corruptedRecord,
+                to: .applied,
+                conflictChoice: .cancel,
+                authorization: authorization
+            )
+            Issue.record("重做错误信任了普通外部路径伪造的废纸篓来源")
+        } catch FileOperationSafetyError.untrustedTrashLocation {
+            #expect(!FileManager.default.fileExists(atPath: restored.path))
+        }
+
+        #expect(try String(contentsOf: protected, encoding: .utf8) == "protected")
+        #expect(!FileManager.default.fileExists(atPath: trash.path))
+    }
+
+    @Test("文件修改与日志落盘之间的中断可被识别或回滚")
+    func testMutationJournalFaultWindows() async throws {
+        let root = temporaryDirectory("FaultWindows")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceFolder = root.appendingPathComponent("Source", isDirectory: true)
+        let folder = root.appendingPathComponent("Space", isDirectory: true)
+        let trash = root.appendingPathComponent("Trash", isDirectory: true)
+        let journalDirectory = root.appendingPathComponent("Journal", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let authorization = FileOperationAuthorizationContext(folder: folder)
+
+        let source = sourceFolder.appendingPathComponent("interrupted.txt")
+        let destination = folder.appendingPathComponent("interrupted.txt")
+        try Data("interrupted".utf8).write(to: source)
+        let pending = OperationRecord(
+            category: .file,
+            kind: .moveItems,
+            summary: "模拟强退移动",
+            state: .pending
+        )
+        let journal = OperationJournalStore(diskStore: OperationJournalDiskStore(
+            directory: journalDirectory
+        ))
+        _ = try await journal.upsert(pending, canvasKey: "fault-window")
+
+        let interruptedCoordinator = FileOperationCoordinator(
+            fileOperationEngine: FileOperationEngine(trashDirectoryForTesting: trash),
+            faultInjection: FileOperationFaultInjection(interruptAfterMutation: 1)
+        )
+        do {
+            _ = try await interruptedCoordinator.performTransfers(
+                [FileTransferPlan(
+                    source: source,
+                    destination: destination,
+                    move: true,
+                    replacesExistingDestination: false
+                )],
+                authorization: authorization
+            ) { _ in }
+            Issue.record("故障注入没有中断文件操作")
+        } catch is SimulatedFileOperationInterruption {
+            #expect(!FileManager.default.fileExists(atPath: source.path))
+            #expect(FileManager.default.fileExists(atPath: destination.path))
+        }
+
+        let reloaded = try await OperationJournalStore(diskStore: OperationJournalDiskStore(
+            directory: journalDirectory
+        )).load(canvasKey: "fault-window")
+        let recoveryCases = await RecoveryAnalyzer().analyze(records: reloaded.records)
+        #expect(recoveryCases.first?.suggestedOutcome == .manualReview)
+
+        let rollbackSource = sourceFolder.appendingPathComponent("rollback.txt")
+        let rollbackDestination = folder.appendingPathComponent("rollback.txt")
+        try Data("rollback".utf8).write(to: rollbackSource)
+        do {
+            _ = try await FileOperationCoordinator(fileOperationEngine: FileOperationEngine(
+                trashDirectoryForTesting: trash
+            )).performTransfers(
+                [FileTransferPlan(
+                    source: rollbackSource,
+                    destination: rollbackDestination,
+                    move: false,
+                    replacesExistingDestination: false
+                )],
+                authorization: authorization
+            ) { event in
+                if case .didApply = event { throw CocoaError(.fileWriteUnknown) }
+            }
+            Issue.record("日志写入失败没有中断批次")
+        } catch let failure as CoordinatedFileOperationFailure {
+            #expect(failure.rollbackSucceeded)
+        }
+        #expect(FileManager.default.fileExists(atPath: rollbackSource.path))
+        #expect(!FileManager.default.fileExists(atPath: rollbackDestination.path))
     }
 
     @Test("增量日志重放最终状态")

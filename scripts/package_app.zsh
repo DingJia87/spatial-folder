@@ -5,8 +5,14 @@ ROOT="${0:A:h:h}"
 source "$ROOT/config/release.env"
 RELEASE_DIR="$ROOT/Release/$MARKETING_VERSION"
 APP_NAME="$PRODUCT_NAME"
-APP="$RELEASE_DIR/$APP_NAME.app"
-ZIP="$RELEASE_DIR/$PRODUCT_NAME.zip"
+PACKAGE_SUFFIX="${PACKAGE_SUFFIX:-}"
+[[ "$PACKAGE_SUFFIX" != *"/"* ]] || {
+    echo "PACKAGE_SUFFIX 不能包含路径分隔符" >&2
+    exit 1
+}
+APP_BASENAME="$PRODUCT_NAME$PACKAGE_SUFFIX"
+APP="$RELEASE_DIR/$APP_BASENAME.app"
+ZIP="$RELEASE_DIR/$APP_BASENAME.zip"
 SDK="$("$ROOT/scripts/select_macos_sdk.zsh")"
 CACHE="$ROOT/.build/module-cache"
 SCRATCH="$ROOT/.build/$MARKETING_VERSION-release"
@@ -23,6 +29,13 @@ PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Assets
     exit 1
 }
 
+# 发布目录是可追溯的冻结产物；即使误运行同一版本脚本，也不允许静默覆盖。
+if [[ -e "$APP" || -e "$ZIP" ]]; then
+    echo "拒绝覆盖已有发布产物：$APP_BASENAME" >&2
+    echo "请更换版本号或 PACKAGE_SUFFIX，并保留原产物。" >&2
+    exit 1
+fi
+
 mkdir -p "$RELEASE_DIR" "$CACHE"
 cd "$ROOT"
 SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$CACHE" \
@@ -30,7 +43,6 @@ SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$C
 BIN_DIR="$(SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" SWIFTPM_MODULECACHE_OVERRIDE="$CACHE" \
     swift build -c release --disable-sandbox --scratch-path "$SCRATCH" --show-bin-path)"
 
-rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/SpatialFolder" "$APP/Contents/MacOS/$APP_NAME"
 cp -R "$BIN_DIR/SpatialFolder_SpatialFolder.bundle" "$APP/Contents/Resources/"
@@ -41,13 +53,12 @@ xattr -cr "$APP"
 codesign --force --deep --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
 VERIFY_DIR="$(mktemp -d /tmp/spatial-folder-$MARKETING_VERSION-verify.XXXXXX)"
 trap 'rm -rf "$VERIFY_DIR"' EXIT
 ditto -x -k "$ZIP" "$VERIFY_DIR"
-codesign --verify --deep --strict --verbose=2 "$VERIFY_DIR/$APP_NAME.app"
+codesign --verify --deep --strict --verbose=2 "$VERIFY_DIR/$APP_BASENAME.app"
 
 echo "$APP"
 echo "$ZIP"

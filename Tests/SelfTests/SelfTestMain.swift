@@ -45,6 +45,9 @@ struct SpatialFolderSelfTests {
         run("3000 项目录扫描保持可接受耗时") { try testLargeFolderScanPerformance() }
         await runAsync("后台批量复制逐步记录并可撤销") { try await testCoordinatedTransferRoundTrip() }
         await runAsync("后台批量失败自动回滚") { try await testCoordinatedTransferFailureRollsBack() }
+        await runAsync("底层批量替换拒绝越界目标") { try await testCoordinatedTransferRejectsEscapedDestination() }
+        await runAsync("所有真实文件写入入口共用授权边界") { try await testUnifiedWriteAuthorization() }
+        await runAsync("文件修改与日志落盘故障窗口可恢复") { try await testMutationJournalFaultRecovery() }
         await runAsync("模型生产路径异步导入不阻塞并落账") { try await testModelAsynchronousImport() }
         await runAsync("一键收纳桌面整体移动并在右侧中下部叠放") { try await testCollectDesktopItems() }
         run("叠放数量和顶层项目识别") { try testPileRecognition() }
@@ -52,6 +55,7 @@ struct SpatialFolderSelfTests {
         await runAsync("异常恢复分析只依据磁盘证据") { try await testRecoveryAnalyzerEvidence() }
         run("App 新建文件夹统一撤销重做") { try testModelCreateFolderUndoRedo() }
         run("App 重命名恢复路径与画布位置") { try testModelRenameUndoRedo() }
+        run("App 重命名拒绝路径穿越") { try testModelRenameRejectsUnsafeNames() }
         run("App 制作副本统一撤销重做") { try testModelDuplicateUndoRedo() }
         run("App 移至废纸篓恢复真实文件与位置") { try testModelTrashUndoRestoresLayout() }
         run("导入替换操作可完整撤销重做") { try testImportReplaceUndoRedo() }
@@ -439,9 +443,14 @@ struct SpatialFolderSelfTests {
             state: .applied,
             actions: [.relocate(RelocateAction(originalPath: original.path, destinationPath: destination.path))]
         )
-        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        let authorization = FileOperationAuthorizationContext(folder: base)
+        let undone = try engine.transition(
+            record, to: .undone, conflictChoice: .cancel, authorization: authorization
+        )
         try check(FileManager.default.fileExists(atPath: original.path), "撤销重命名没有恢复原路径")
-        let redone = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        let redone = try engine.transition(
+            undone, to: .applied, conflictChoice: .cancel, authorization: authorization
+        )
         try check(FileManager.default.fileExists(atPath: destination.path), "重做重命名没有恢复目标路径")
         try check(redone.state == .applied, "重做后的状态不正确")
     }
@@ -460,9 +469,14 @@ struct SpatialFolderSelfTests {
             state: .applied,
             actions: [.materialize(MaterializeAction(destinationPath: destination.path))]
         )
-        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        let authorization = FileOperationAuthorizationContext(folder: base)
+        let undone = try engine.transition(
+            record, to: .undone, conflictChoice: .cancel, authorization: authorization
+        )
         try check(!FileManager.default.fileExists(atPath: destination.path), "撤销新建后文件仍存在")
-        _ = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        _ = try engine.transition(
+            undone, to: .applied, conflictChoice: .cancel, authorization: authorization
+        )
         let restored = try String(contentsOf: destination, encoding: .utf8)
         try check(restored == "edited-after-create", "重做没有保留撤销前的文件内容")
     }
@@ -484,9 +498,14 @@ struct SpatialFolderSelfTests {
             state: .applied,
             actions: [.discard(DiscardAction(originalPath: original.path, trashPath: trashURL.path))]
         )
-        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        let authorization = FileOperationAuthorizationContext(folder: base)
+        let undone = try engine.transition(
+            record, to: .undone, conflictChoice: .cancel, authorization: authorization
+        )
         try check(FileManager.default.fileExists(atPath: original.path), "撤销删除没有恢复文件")
-        let redone = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        let redone = try engine.transition(
+            undone, to: .applied, conflictChoice: .cancel, authorization: authorization
+        )
         guard case let .discard(action) = redone.actions.first else {
             throw SelfTestFailure(description: "删除操作类型被改变")
         }
@@ -512,11 +531,16 @@ struct SpatialFolderSelfTests {
             actions: [.tags(TagAction(path: file.path, before: [], after: after))]
         )
         let engine = FileOperationEngine(trashDirectoryForTesting: base.appendingPathComponent("Trash"))
-        let undone = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        let authorization = FileOperationAuthorizationContext(folder: base)
+        let undone = try engine.transition(
+            record, to: .undone, conflictChoice: .cancel, authorization: authorization
+        )
         let undoneTags = try URL(fileURLWithPath: file.path)
             .resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
         try check(undoneTags.isEmpty, "撤销没有清除 Finder 标签：\(undoneTags)")
-        _ = try engine.transition(undone, to: .applied, conflictChoice: .cancel)
+        _ = try engine.transition(
+            undone, to: .applied, conflictChoice: .cancel, authorization: authorization
+        )
         let redoneTags = try URL(fileURLWithPath: file.path)
             .resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
         try check(redoneTags == ["红色"], "重做没有恢复 Finder 标签：\(redoneTags)")
@@ -553,7 +577,12 @@ struct SpatialFolderSelfTests {
             state: .applied,
             actions: [.discard(DiscardAction(originalPath: original.path, trashPath: trashURL.path))]
         )
-        let undone = try engine.transition(record, to: .undone, conflictChoice: .keepBoth)
+        let undone = try engine.transition(
+            record,
+            to: .undone,
+            conflictChoice: .keepBoth,
+            authorization: FileOperationAuthorizationContext(folder: base)
+        )
         guard case let .discard(action) = undone.actions.first else {
             throw SelfTestFailure(description: "恢复操作类型错误")
         }
@@ -579,11 +608,16 @@ struct SpatialFolderSelfTests {
             state: .applied,
             actions: [.discard(DiscardAction(originalPath: original.path, trashPath: oldTrash.path))]
         )
-        let undone = try engine.transition(record, to: .undone, conflictChoice: .replace)
+        let authorization = FileOperationAuthorizationContext(folder: base)
+        let undone = try engine.transition(
+            record, to: .undone, conflictChoice: .replace, authorization: authorization
+        )
         let restoredOldContent = try String(contentsOf: original, encoding: .utf8)
         try check(restoredOldContent == "old", "替换后没有恢复旧文件")
         try check(undone.displacements.count == 1, "被替换文件没有登记可恢复位置")
-        let redone = try engine.transition(undone, to: .applied, conflictChoice: .replace)
+        let redone = try engine.transition(
+            undone, to: .applied, conflictChoice: .replace, authorization: authorization
+        )
         let restoredCurrentContent = try String(contentsOf: original, encoding: .utf8)
         try check(restoredCurrentContent == "current", "重做后没有恢复被替换文件")
         try check(redone.displacements.isEmpty, "重做后冲突位移记录没有清理")
@@ -608,7 +642,12 @@ struct SpatialFolderSelfTests {
         )
         let engine = FileOperationEngine(trashDirectoryForTesting: base.appendingPathComponent("Trash"))
         do {
-            _ = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+            _ = try engine.transition(
+                record,
+                to: .undone,
+                conflictChoice: .cancel,
+                authorization: FileOperationAuthorizationContext(folder: base)
+            )
             throw SelfTestFailure(description: "错误接受了缺少源文件的多项撤销")
         } catch FileOperationTransitionError.missingSource {
             try check(FileManager.default.fileExists(atPath: existing.path), "预检前就移走了其他文件")
@@ -891,7 +930,7 @@ struct SpatialFolderSelfTests {
                 move: false,
                 replacesExistingDestination: true
             )
-        ]) { event in
+        ], authorization: FileOperationAuthorizationContext(folder: destinationFolder)) { event in
             await collector.append(event)
         }
         try check(actions.count == 2, "替换复制没有记录保护旧文件和创建新文件两个步骤")
@@ -907,7 +946,12 @@ struct SpatialFolderSelfTests {
             state: .applied,
             actions: actions
         )
-        _ = try engine.transition(record, to: .undone, conflictChoice: .cancel)
+        _ = try engine.transition(
+            record,
+            to: .undone,
+            conflictChoice: .cancel,
+            authorization: FileOperationAuthorizationContext(folder: destinationFolder)
+        )
         let restoredContent = try String(contentsOf: destination, encoding: .utf8)
         try check(restoredContent == "old", "撤销后没有恢复被替换的旧文件")
     }
@@ -943,13 +987,212 @@ struct SpatialFolderSelfTests {
                     move: false,
                     replacesExistingDestination: false
                 )
-            ]) { _ in }
+            ], authorization: FileOperationAuthorizationContext(folder: destinationFolder)) { _ in }
             throw SelfTestFailure(description: "缺少源文件的批量操作被错误视为成功")
         } catch let failure as CoordinatedFileOperationFailure {
             try check(failure.rollbackSucceeded, "批量失败后没有完成自动回滚")
             try check(!FileManager.default.fileExists(atPath: firstDestination.path), "批量失败后留下已复制项目")
             try check(FileManager.default.fileExists(atPath: firstSource.path), "回滚错误修改了复制来源")
         }
+    }
+
+    private static func testCoordinatedTransferRejectsEscapedDestination() async throws {
+        let base = temporaryDirectory(prefix: "CoordinatedSafety")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let sourceFolder = base.appendingPathComponent("Source", isDirectory: true)
+        let destinationFolder = base.appendingPathComponent("Destination", isDirectory: true)
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let source = sourceFolder.appendingPathComponent("new.txt")
+        let protected = base.appendingPathComponent("protected.txt")
+        try Data("new".utf8).write(to: source)
+        try Data("protected".utf8).write(to: protected)
+
+        let coordinator = FileOperationCoordinator(fileOperationEngine: FileOperationEngine(
+            trashDirectoryForTesting: trash
+        ))
+        do {
+            _ = try await coordinator.performTransfers([
+                FileTransferPlan(
+                    source: source,
+                    destination: destinationFolder.appendingPathComponent("../protected.txt"),
+                    move: true,
+                    replacesExistingDestination: true
+                )
+            ], authorization: FileOperationAuthorizationContext(folder: destinationFolder)) { _ in }
+            throw SelfTestFailure(description: "越界替换计划被错误执行")
+        } catch let failure as CoordinatedFileOperationFailure {
+            try check(failure.rollbackSucceeded, "越界计划拒绝后错误标记为回滚失败")
+            try check(failure.actions.isEmpty, "越界计划拒绝前已产生文件动作")
+        }
+        try check(FileManager.default.fileExists(atPath: source.path), "越界计划改动了来源文件")
+        let protectedContent = try String(contentsOf: protected, encoding: .utf8)
+        try check(
+            protectedContent == "protected",
+            "越界计划覆盖了授权目录外的文件"
+        )
+        try check(!FileManager.default.fileExists(atPath: trash.path), "越界计划把外部文件移入了废纸篓")
+    }
+
+    private static func testUnifiedWriteAuthorization() async throws {
+        let base = temporaryDirectory(prefix: "UnifiedAuthorization")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let folder = base.appendingPathComponent("Space", isDirectory: true)
+        let outside = base.appendingPathComponent("Outside", isDirectory: true)
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let protected = outside.appendingPathComponent("protected.txt")
+        try Data("protected".utf8).write(to: protected)
+        let authorization = FileOperationAuthorizationContext(folder: folder)
+        let engine = FileOperationEngine(trashDirectoryForTesting: trash)
+        let coordinator = FileOperationCoordinator(fileOperationEngine: engine)
+
+        do {
+            _ = try await coordinator.performCompressions(
+                [FileCompressionPlan(
+                    source: protected,
+                    destination: folder.appendingPathComponent("protected.zip")
+                )],
+                authorization: authorization
+            ) { _ in }
+            throw SelfTestFailure(description: "压缩错误接受外部来源")
+        } catch let failure as CoordinatedFileOperationFailure {
+            try check(failure.actions.isEmpty, "压缩越界拒绝前已产生动作")
+        }
+
+        do {
+            _ = try await coordinator.performTrash(
+                [protected], authorization: authorization
+            ) { _ in }
+            throw SelfTestFailure(description: "废纸篓错误接受外部项目")
+        } catch let failure as CoordinatedFileOperationFailure {
+            try check(failure.actions.isEmpty, "废纸篓越界拒绝前已产生动作")
+        }
+
+        let escapedDirectory = outside.appendingPathComponent("escaped", isDirectory: true)
+        do {
+            _ = try await coordinator.createDirectory(
+                at: escapedDirectory,
+                authorization: authorization
+            ) { _ in }
+            throw SelfTestFailure(description: "新建文件夹错误接受外部目标")
+        } catch let failure as CoordinatedFileOperationFailure {
+            try check(failure.actions.isEmpty, "新建越界拒绝前已产生动作")
+        }
+
+        do {
+            _ = try await coordinator.applyTags(
+                [TagAction(path: protected.path, before: [], after: ["红色\n6"])],
+                authorization: authorization
+            ) { _ in }
+            throw SelfTestFailure(description: "标签写入错误接受外部项目")
+        } catch let failure as CoordinatedFileOperationFailure {
+            try check(failure.actions.isEmpty, "标签越界拒绝前已产生动作")
+        }
+
+        let restored = folder.appendingPathComponent("restored.txt")
+        let corruptedRecord = OperationRecord(
+            category: .file,
+            kind: .createDocument,
+            summary: "损坏的重做记录",
+            state: .undone,
+            actions: [.materialize(MaterializeAction(
+                destinationPath: restored.path,
+                undoTrashPath: protected.path
+            ))]
+        )
+        do {
+            _ = try engine.transition(
+                corruptedRecord,
+                to: .applied,
+                conflictChoice: .cancel,
+                authorization: authorization
+            )
+            throw SelfTestFailure(description: "重做错误信任普通外部文件伪造的废纸篓路径")
+        } catch FileOperationSafetyError.untrustedTrashLocation {}
+
+        let content = try String(contentsOf: protected, encoding: .utf8)
+        try check(content == "protected", "统一授权边界改动了外部文件")
+        try check(!FileManager.default.fileExists(atPath: escapedDirectory.path), "统一授权边界在外部创建了目录")
+        try check(!FileManager.default.fileExists(atPath: restored.path), "损坏重做记录在空间中生成了文件")
+        try check(!FileManager.default.fileExists(atPath: trash.path), "统一授权边界误用了废纸篓")
+    }
+
+    private static func testMutationJournalFaultRecovery() async throws {
+        let base = temporaryDirectory(prefix: "FaultRecovery")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let sourceFolder = base.appendingPathComponent("Source", isDirectory: true)
+        let folder = base.appendingPathComponent("Space", isDirectory: true)
+        let trash = base.appendingPathComponent("Trash", isDirectory: true)
+        let journalDirectory = base.appendingPathComponent("Journal", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let authorization = FileOperationAuthorizationContext(folder: folder)
+
+        let source = sourceFolder.appendingPathComponent("interrupted.txt")
+        let destination = folder.appendingPathComponent("interrupted.txt")
+        try Data("interrupted".utf8).write(to: source)
+        let pending = OperationRecord(
+            category: .file,
+            kind: .moveItems,
+            summary: "模拟强退移动",
+            state: .pending
+        )
+        let journal = OperationJournalStore(diskStore: OperationJournalDiskStore(
+            directory: journalDirectory
+        ))
+        _ = try await journal.upsert(pending, canvasKey: "fault-window")
+
+        let interruptedCoordinator = FileOperationCoordinator(
+            fileOperationEngine: FileOperationEngine(trashDirectoryForTesting: trash),
+            faultInjection: FileOperationFaultInjection(interruptAfterMutation: 1)
+        )
+        do {
+            _ = try await interruptedCoordinator.performTransfers(
+                [FileTransferPlan(
+                    source: source,
+                    destination: destination,
+                    move: true,
+                    replacesExistingDestination: false
+                )],
+                authorization: authorization
+            ) { _ in }
+            throw SelfTestFailure(description: "故障注入没有中断文件操作")
+        } catch is SimulatedFileOperationInterruption {}
+        try check(!FileManager.default.fileExists(atPath: source.path), "强退模拟没有留下已完成的系统调用")
+        try check(FileManager.default.fileExists(atPath: destination.path), "强退模拟缺少中断时的目标文件")
+
+        let reloaded = try await OperationJournalStore(diskStore: OperationJournalDiskStore(
+            directory: journalDirectory
+        )).load(canvasKey: "fault-window")
+        let cases = await RecoveryAnalyzer().analyze(records: reloaded.records)
+        try check(cases.first?.suggestedOutcome == .manualReview, "无动作落盘的强退记录被错误自动判定")
+
+        let rollbackSource = sourceFolder.appendingPathComponent("rollback.txt")
+        let rollbackDestination = folder.appendingPathComponent("rollback.txt")
+        try Data("rollback".utf8).write(to: rollbackSource)
+        do {
+            _ = try await FileOperationCoordinator(fileOperationEngine: FileOperationEngine(
+                trashDirectoryForTesting: trash
+            )).performTransfers(
+                [FileTransferPlan(
+                    source: rollbackSource,
+                    destination: rollbackDestination,
+                    move: false,
+                    replacesExistingDestination: false
+                )],
+                authorization: authorization
+            ) { event in
+                if case .didApply = event { throw CocoaError(.fileWriteUnknown) }
+            }
+            throw SelfTestFailure(description: "日志写入失败没有中断批次")
+        } catch let failure as CoordinatedFileOperationFailure {
+            try check(failure.rollbackSucceeded, "动作日志写入失败后没有回滚")
+        }
+        try check(FileManager.default.fileExists(atPath: rollbackSource.path), "日志失败回滚改动了复制来源")
+        try check(!FileManager.default.fileExists(atPath: rollbackDestination.path), "日志失败回滚遗留了目标文件")
     }
 
     /// 覆盖 App 真正使用的异步入口，而不只测试底层协调器。
@@ -1236,13 +1479,34 @@ struct SpatialFolderSelfTests {
         try check(FileManager.default.fileExists(atPath: renamed.path), "重做重命名没有恢复新路径")
     }
 
+    private static func testModelRenameRejectsUnsafeNames() throws {
+        let fixture = try makeFixture(itemCount: 1)
+        defer { fixture.cleanup() }
+        let item = try require(fixture.model.items.first, "没有测试文件")
+        let operationCount = fixture.model.operationRecords.count
+        let escaped = fixture.base.appendingPathComponent("escaped.txt")
+
+        for unsafeName in ["../escaped.txt", ".", "..", "sub/name", "bad\u{0}name"] {
+            fixture.model.errorMessage = nil
+            fixture.model.rename(item, to: unsafeName, conflictChoice: .replace)
+            try check(fixture.model.errorMessage != nil, "危险名称“\(unsafeName)”没有显示错误")
+            try check(FileManager.default.fileExists(atPath: item.url.path), "危险重命名改动了原文件")
+            try check(!FileManager.default.fileExists(atPath: escaped.path), "危险重命名在空间外创建了文件")
+            try check(fixture.model.pendingConflict == nil, "危险重命名错误进入了替换确认")
+            try check(fixture.model.operationRecords.count == operationCount, "危险重命名产生了操作记录")
+        }
+    }
+
     private static func testModelDuplicateUndoRedo() throws {
         let fixture = try makeFixture(itemCount: 1)
         defer { fixture.cleanup() }
         let item = try require(fixture.model.items.first, "没有测试文件")
         let duplicate = fixture.folder.appendingPathComponent("item-000 2.txt")
         fixture.model.duplicate(item)
-        try check(FileManager.default.fileExists(atPath: duplicate.path), "制作副本没有创建真实文件")
+        try check(
+            FileManager.default.fileExists(atPath: duplicate.path),
+            "制作副本没有创建真实文件：\(fixture.model.errorMessage ?? "none")"
+        )
         fixture.model.undoLastAction()
         try check(!FileManager.default.fileExists(atPath: duplicate.path), "撤销制作副本没有移除副本")
         fixture.model.redoLastAction()
@@ -1258,7 +1522,10 @@ struct SpatialFolderSelfTests {
         fixture.model.trash(item)
         try check(!FileManager.default.fileExists(atPath: item.url.path), "真实文件没有移至废纸篓")
         fixture.model.undoLastAction()
-        try check(FileManager.default.fileExists(atPath: item.url.path), "撤销没有恢复真实文件")
+        try check(
+            FileManager.default.fileExists(atPath: item.url.path),
+            "撤销没有恢复真实文件：\(fixture.model.errorMessage ?? "none")"
+        )
         try check(fixture.model.positions[item.id] == expected, "撤销删除没有恢复图标位置")
         fixture.model.redoLastAction()
         try check(!FileManager.default.fileExists(atPath: item.url.path), "重做没有再次移至废纸篓")
@@ -1567,7 +1834,10 @@ struct SpatialFolderSelfTests {
         defer { fixture.cleanup() }
         let targets = Array(fixture.model.items.prefix(2))
         fixture.model.duplicate(targets)
-        try check(fixture.model.items.count == 5, "批量制作副本没有生成两个项目")
+        try check(
+            fixture.model.items.count == 5,
+            "批量制作副本没有生成两个项目：\(fixture.model.errorMessage ?? "none")"
+        )
         fixture.model.trash(targets)
         try check(targets.allSatisfy { !FileManager.default.fileExists(atPath: $0.url.path) }, "批量废纸篓仍保留原文件")
         try check(fixture.model.operationRecords.last?.kind == .trash, "批量废纸篓没有生成统一记录")

@@ -8,7 +8,7 @@
 [![Swift](https://img.shields.io/badge/Swift-6-orange?logo=swift)](Package.swift)
 [![CI](https://github.com/DingJia87/spatial-folder/actions/workflows/ci.yml/badge.svg)](https://github.com/DingJia87/spatial-folder/actions/workflows/ci.yml)
 
-当前正式版本：**v5.2.0**
+当前正式版本：**v5.3.0**
 
 ## 界面预览
 
@@ -91,14 +91,14 @@
 ./scripts/package_app.zsh
 ```
 
-5.0 包含 18 项标准测试和 71 项完整自测。CI 会执行测试及严格 Release 构建。
+5.3.0 正式试用版包含 22 项标准测试和 82 项完整自测。CI 会执行测试及严格 Release 构建。
 
 ## 文档与支持
 
 - [用户指南](docs/USER_GUIDE.md)
 - [当前状态](docs/CURRENT_STATUS.md)
 - [版本记录](CHANGELOG.md)
-- [5.0 发布说明](docs/releases/RELEASE_NOTES_5.0.md)
+- [5.3.0 发布说明](docs/releases/RELEASE_NOTES_5.3.md)
 - [隐私说明](docs/PRIVACY.md)
 - [支持与反馈](docs/SUPPORT.md)
 - [安全政策](SECURITY.md)

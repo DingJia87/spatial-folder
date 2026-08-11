@@ -13,8 +13,6 @@ struct ContentView: View {
     @State private var layoutHistoryPresented = false
     @State private var inboxPresented = false
     @State private var toolbarHeight: CGFloat = 52
-    @State private var draggedSpacePath: String?
-    @State private var spaceDragOffset: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -282,73 +280,7 @@ struct ContentView: View {
     }
 
     private func spaceTab(for folder: URL) -> some View {
-        let active = folder.standardizedFileURL == model.folderURL?.standardizedFileURL
-        return HStack(spacing: 2) {
-            Button {
-                if !active { model.open(folder: folder) }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: active ? "folder.fill" : "folder")
-                    Text(folder.lastPathComponent)
-                        .font(.callout.weight(active ? .semibold : .regular))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .frame(maxWidth: 82)
-                .padding(.leading, 8)
-                .padding(.vertical, 6)
-            }
-            .buttonStyle(.plain)
-            .disabled(model.isFileOperationInProgress)
-            .help(active ? "当前空间：\(folder.path)" : "切换到“\(folder.lastPathComponent)”：\(folder.path)")
-
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 3)
-                .padding(.trailing, 7)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-                .help("拖动调整“\(folder.lastPathComponent)”的位置")
-                .gesture(
-                    DragGesture(minimumDistance: 3)
-                        .onChanged { value in
-                            draggedSpacePath = folder.path
-                            spaceDragOffset = value.translation.width
-                        }
-                        .onEnded { value in
-                            model.movePinnedFolder(folder, byHorizontalDistance: value.translation.width)
-                            draggedSpacePath = nil
-                            spaceDragOffset = 0
-                        }
-                )
-                .accessibilityLabel("拖动调整“\(folder.lastPathComponent)”的位置")
-                .accessibilityAction {
-                    model.movePinnedFolder(folder, byHorizontalDistance: 90)
-                }
-                .allowsHitTesting(!model.isFileOperationInProgress)
-        }
-        .offset(x: draggedSpacePath == folder.path ? spaceDragOffset : 0)
-        .zIndex(draggedSpacePath == folder.path ? 1 : 0)
-        .background(
-            active ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.10),
-            in: RoundedRectangle(cornerRadius: 7)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(
-                    draggedSpacePath == folder.path
-                        ? Color.accentColor
-                        : (active ? Color.accentColor.opacity(0.7) : Color.clear),
-                    lineWidth: draggedSpacePath == folder.path ? 2 : 1
-                )
-            }
-        .contextMenu {
-            if model.isPinnedFolder(folder), !active {
-                Button("从顶部移除") { model.unpinFolder(folder) }
-            }
-            Button("在 Finder 中打开") { NSWorkspace.shared.open(folder) }
-        }
+        SpaceTabView(folder: folder)
     }
 
     private func spaceOverflowMenu(excluding visibleFolders: [URL]) -> some View {
@@ -538,6 +470,92 @@ struct ContentView: View {
         .padding(.vertical, 12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .shadow(radius: 8)
+    }
+}
+
+/// 拖动位移保留在单个标签内，避免鼠标每移动一帧都让整条工具栏和
+/// `ViewThatFits` 的所有候选宽度重新求值。
+private struct SpaceTabView: View {
+    @EnvironmentObject private var model: FolderCanvasModel
+    let folder: URL
+
+    @GestureState private var horizontalDrag: CGFloat = 0
+
+    private var active: Bool {
+        folder.standardizedFileURL == model.folderURL?.standardizedFileURL
+    }
+
+    private var isDragging: Bool {
+        abs(horizontalDrag) > 0.5
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Button {
+                if !active { model.open(folder: folder) }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: active ? "folder.fill" : "folder")
+                    Text(folder.lastPathComponent)
+                        .font(.callout.weight(active ? .semibold : .regular))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: 82)
+                .padding(.leading, 8)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .disabled(model.isFileOperationInProgress)
+            .help(active ? "当前空间：\(folder.path)" : "切换到“\(folder.lastPathComponent)”：\(folder.path)")
+
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 3)
+                .padding(.trailing, 7)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .help("拖动调整“\(folder.lastPathComponent)”的位置")
+                .gesture(
+                    DragGesture(minimumDistance: 3)
+                        .updating($horizontalDrag) { value, state, _ in
+                            state = value.translation.width
+                        }
+                        .onEnded { value in
+                            model.movePinnedFolder(folder, byHorizontalDistance: value.translation.width)
+                        }
+                )
+                .accessibilityLabel("拖动调整“\(folder.lastPathComponent)”的位置")
+                .accessibilityAction {
+                    model.movePinnedFolder(folder, byHorizontalDistance: 90)
+                }
+                .allowsHitTesting(!model.isFileOperationInProgress)
+        }
+        .background(
+            active ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.10),
+            in: RoundedRectangle(cornerRadius: 7)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(
+                    isDragging ? Color.accentColor : (active ? Color.accentColor.opacity(0.7) : Color.clear),
+                    lineWidth: isDragging ? 2 : 1
+                )
+        }
+        .contextMenu {
+            if model.isPinnedFolder(folder), !active {
+                Button("从顶部移除") { model.unpinFolder(folder) }
+            }
+            Button("在 Finder 中打开") { NSWorkspace.shared.open(folder) }
+        }
+        // 背景、描边和文字先合成一枚完整标签，再整体位移，避免内容与背景错帧。
+        .compositingGroup()
+        .offset(x: horizontalDrag)
+        .zIndex(isDragging ? 1 : 0)
+        .transaction { transaction in
+            if isDragging { transaction.animation = nil }
+        }
     }
 }
 

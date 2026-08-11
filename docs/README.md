@@ -9,7 +9,16 @@
 
 ## 当前开发基线
 
+- [5.3 正式试用版计划与验收](plans/PLAN_5.3.md)
+- [5.3 发布说明](releases/RELEASE_NOTES_5.3.md)
+- [5.3 性能说明](performance/PERFORMANCE_5.3.md)
+- [5.2.2 写入安全闭环计划与验收](plans/PLAN_5.2.2.md)
+- [5.2.2 写入安全闭环说明](releases/RELEASE_NOTES_5.2.2.md)
+- [5.2.2 性能说明](performance/PERFORMANCE_5.2.2.md)
 - [当前状态与交接](CURRENT_STATUS.md)
+- [5.2.1 安全修复计划与验收](plans/PLAN_5.2.1.md)
+- [5.2.1 安全修复说明](releases/RELEASE_NOTES_5.2.1.md)
+- [5.2.1 性能说明](performance/PERFORMANCE_5.2.1.md)
 - [5.2 计划与验收](plans/PLAN_5.2.md)
 - [5.2 发布说明](releases/RELEASE_NOTES_5.2.md)
 - [5.2 性能说明](performance/PERFORMANCE_5.2.md)

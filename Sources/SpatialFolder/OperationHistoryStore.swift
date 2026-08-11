@@ -228,6 +228,68 @@ struct OperationRecord: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+extension FileOperationPathValidator {
+    /// 撤销/重做允许“外部来源 ↔ 当前空间”的搬移记录，但每个动作必须至少有一端属于
+    /// 当前空间；新建、删除和标签动作则只能指向当前空间的第一层项目。
+    static func validateTransitionRecord(
+        _ record: OperationRecord,
+        authorization: FileOperationAuthorizationContext
+    ) throws -> [URL] {
+        let folder = authorization.folder
+        var authorizedEndpoints = Set<String>()
+        var trashURLs: [URL] = []
+
+        for action in record.actions {
+            switch action {
+            case let .relocate(value):
+                let original = URL(fileURLWithPath: value.originalPath).standardizedFileURL
+                let destination = URL(fileURLWithPath: value.destinationPath).standardizedFileURL
+                guard isDirectChild(original, of: folder) || isDirectChild(destination, of: folder) else {
+                    throw FileOperationSafetyError.sourceOutsideAuthorizedFolder
+                }
+                authorizedEndpoints.insert(original.path)
+                authorizedEndpoints.insert(destination.path)
+
+            case let .materialize(value):
+                let destination = URL(fileURLWithPath: value.destinationPath).standardizedFileURL
+                guard isDirectChild(destination, of: folder) else {
+                    throw FileOperationSafetyError.destinationOutsideAuthorizedFolder
+                }
+                authorizedEndpoints.insert(destination.path)
+                if let path = value.undoTrashPath {
+                    trashURLs.append(URL(fileURLWithPath: path))
+                }
+
+            case let .discard(value):
+                let original = URL(fileURLWithPath: value.originalPath).standardizedFileURL
+                guard isDirectChild(original, of: folder) else {
+                    throw FileOperationSafetyError.sourceOutsideAuthorizedFolder
+                }
+                authorizedEndpoints.insert(original.path)
+                if let path = value.trashPath {
+                    trashURLs.append(URL(fileURLWithPath: path))
+                }
+
+            case let .tags(value):
+                let url = URL(fileURLWithPath: value.path).standardizedFileURL
+                guard isDirectChild(url, of: folder) else {
+                    throw FileOperationSafetyError.sourceOutsideAuthorizedFolder
+                }
+                authorizedEndpoints.insert(url.path)
+            }
+        }
+
+        for displacement in record.displacements {
+            let original = URL(fileURLWithPath: displacement.originalPath).standardizedFileURL
+            guard authorizedEndpoints.contains(original.path) else {
+                throw FileOperationSafetyError.destinationOutsideAuthorizedFolder
+            }
+            trashURLs.append(URL(fileURLWithPath: displacement.trashPath))
+        }
+        return trashURLs
+    }
+}
+
 struct OperationHistoryDocument: Codable, Equatable, Sendable {
     static let currentVersion = 1
 
@@ -340,20 +402,30 @@ struct FileOperationEngine: @unchecked Sendable {
     var fileManager: FileManager = .default
     var trashDirectoryForTesting: URL?
 
-    func moveToTrash(_ url: URL) throws -> URL {
-        try trashItem(at: url)
+    func moveToTrash(
+        _ url: URL,
+        authorization: FileOperationAuthorizationContext
+    ) throws -> URL {
+        try FileOperationPathValidator.validateSources([url], authorization: authorization)
+        return try trashItem(at: url)
     }
 
     func transition(
         _ record: OperationRecord,
         to targetState: OperationState,
-        conflictChoice: ConflictChoice
+        conflictChoice: ConflictChoice,
+        authorization: FileOperationAuthorizationContext
     ) throws -> OperationRecord {
         guard record.category == .file,
               (record.state == .applied && targetState == .undone) ||
                 (record.state == .undone && targetState == .applied) else {
             throw FileOperationTransitionError.invalidState
         }
+        let trashURLs = try FileOperationPathValidator.validateTransitionRecord(
+            record,
+            authorization: authorization
+        )
+        try validateTrustedTrashLocations(trashURLs)
         try preflight(record, to: targetState, conflictChoice: conflictChoice)
         var updated = record
         let previousState = record.state
@@ -397,6 +469,46 @@ struct FileOperationEngine: @unchecked Sendable {
         updated.transitionDate = Date()
         updated.detail = nil
         return updated
+    }
+
+    private func validateTrustedTrashLocations(_ urls: [URL]) throws {
+        let testingDirectory = trashDirectoryForTesting?
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        for url in urls where fileManager.fileExists(atPath: url.path) {
+            let parent = url.standardizedFileURL
+                .deletingLastPathComponent()
+                .resolvingSymlinksInPath()
+            if let testingDirectory,
+               parent == testingDirectory {
+                continue
+            }
+
+            let homeTrash = fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent(".Trash", isDirectory: true)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+            if parent == homeTrash { continue }
+
+            let userTrash = try? fileManager.url(
+                for: .trashDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: false
+            ).standardizedFileURL
+                .resolvingSymlinksInPath()
+            if let userTrash, parent == userTrash { continue }
+
+            if let volume = try? url.resourceValues(forKeys: [.volumeURLKey]).volume,
+               parent == volume
+                    .appendingPathComponent(".Trashes", isDirectory: true)
+                    .appendingPathComponent(String(getuid()), isDirectory: true)
+                    .standardizedFileURL
+                    .resolvingSymlinksInPath() {
+                continue
+            }
+            throw FileOperationSafetyError.untrustedTrashLocation
+        }
     }
 
     private func preflight(

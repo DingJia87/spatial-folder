@@ -32,15 +32,30 @@ struct CoordinatedFileOperationFailure: LocalizedError, Sendable {
     var errorDescription: String? { message }
 }
 
+/// 只供回归测试模拟“系统调用已修改文件，但动作还未写入日志”的强退窗口。
+struct FileOperationFaultInjection: Equatable, Sendable {
+    let interruptAfterMutation: Int
+}
+
+struct SimulatedFileOperationInterruption: LocalizedError, Equatable, Sendable {
+    var errorDescription: String? { "模拟在文件修改后、日志落盘前强制中断。" }
+}
+
 /// 串行执行耗时文件操作。Actor 隔离保证同一模型不会并行复制两批文件。
 actor FileOperationCoordinator {
     typealias EventHandler = @Sendable (CoordinatedFileOperationEvent) async throws -> Void
 
     private let fileManager: FileManager
     private let fileOperationEngine: FileOperationEngine
+    private let faultInjection: FileOperationFaultInjection?
+    private var mutationCount = 0
 
-    init(fileOperationEngine: FileOperationEngine = FileOperationEngine()) {
+    init(
+        fileOperationEngine: FileOperationEngine = FileOperationEngine(),
+        faultInjection: FileOperationFaultInjection? = nil
+    ) {
         self.fileOperationEngine = fileOperationEngine
+        self.faultInjection = faultInjection
         fileManager = fileOperationEngine.fileManager
     }
 
@@ -48,13 +63,22 @@ actor FileOperationCoordinator {
     /// 但会在该系统调用返回后立刻停止下一项，并安全回滚本批次已完成内容。
     func performTransfers(
         _ plans: [FileTransferPlan],
+        authorization: FileOperationAuthorizationContext,
+        sourceScope: FileTransferSourceScope = .externalAllowed,
         eventHandler: EventHandler
     ) async throws -> [ReversibleFileAction] {
+        // 必须在任何替换、移动或复制之前一次性检查整批计划。
+        // 否则恶意或损坏计划可能先把边界外的同名项目移入废纸篓。
         var actions: [ReversibleFileAction] = []
         let totalSteps = plans.reduce(0) { $0 + ($1.replacesExistingDestination ? 2 : 1) }
         var completed = 0
 
         do {
+            try FileOperationPathValidator.validateTransferPlans(
+                plans,
+                authorization: authorization,
+                sourceScope: sourceScope
+            )
             for plan in plans {
                 try Task.checkCancellation()
                 if plan.replacesExistingDestination,
@@ -64,13 +88,17 @@ actor FileOperationCoordinator {
                         total: totalSteps,
                         detail: "正在保护同名项目“\(plan.destination.lastPathComponent)”"
                     ))
-                    let trashURL = try fileOperationEngine.moveToTrash(plan.destination)
+                    let trashURL = try fileOperationEngine.moveToTrash(
+                        plan.destination,
+                        authorization: authorization
+                    )
                     let action = ReversibleFileAction.discard(DiscardAction(
                         originalPath: plan.destination.path,
                         trashPath: trashURL.path
                     ))
                     actions.append(action)
                     completed += 1
+                    try injectInterruptionAfterMutationIfNeeded()
                     try await eventHandler(.didApply(action: action, completed: completed, total: totalSteps))
                 }
 
@@ -99,6 +127,7 @@ actor FileOperationCoordinator {
                             : .materialize(MaterializeAction(destinationPath: plan.destination.path))
                         actions.append(partialAction)
                         completed += 1
+                        try injectInterruptionAfterMutationIfNeeded()
                         try await eventHandler(.didApply(
                             action: partialAction,
                             completed: completed,
@@ -116,16 +145,19 @@ actor FileOperationCoordinator {
                     : .materialize(MaterializeAction(destinationPath: plan.destination.path))
                 actions.append(action)
                 completed += 1
+                try injectInterruptionAfterMutationIfNeeded()
                 try await eventHandler(.didApply(action: action, completed: completed, total: totalSteps))
             }
             try Task.checkCancellation()
             return actions
+        } catch let interruption as SimulatedFileOperationInterruption {
+            throw interruption
         } catch {
             let cancelled = error is CancellationError
             try? await eventHandler(.rollingBack(
                 detail: cancelled ? "正在取消并恢复本批次已完成内容" : "操作失败，正在恢复已完成内容"
             ))
-            let rollback = rollback(actions: actions)
+            let rollback = rollback(actions: actions, authorization: authorization)
             throw CoordinatedFileOperationFailure(
                 message: cancelled ? "操作已取消。" : error.localizedDescription,
                 actions: rollback.actions,
@@ -140,20 +172,27 @@ actor FileOperationCoordinator {
     func compress(
         source: URL,
         destination: URL,
+        authorization: FileOperationAuthorizationContext,
         eventHandler: EventHandler
     ) async throws -> [ReversibleFileAction] {
         try await performCompressions(
             [FileCompressionPlan(source: source, destination: destination)],
+            authorization: authorization,
             eventHandler: eventHandler
         )
     }
 
     func performCompressions(
         _ plans: [FileCompressionPlan],
+        authorization: FileOperationAuthorizationContext,
         eventHandler: EventHandler
     ) async throws -> [ReversibleFileAction] {
         var actions: [ReversibleFileAction] = []
         do {
+            try FileOperationPathValidator.validateCompressionPlans(
+                plans,
+                authorization: authorization
+            )
             for (index, plan) in plans.enumerated() {
                 try Task.checkCancellation()
                 try await eventHandler(.willBegin(
@@ -173,6 +212,7 @@ actor FileOperationCoordinator {
                     destinationPath: plan.destination.path
                 ))
                 actions.append(action)
+                try injectInterruptionAfterMutationIfNeeded()
                 try await eventHandler(.didApply(
                     action: action,
                     completed: index + 1,
@@ -181,6 +221,8 @@ actor FileOperationCoordinator {
             }
             try Task.checkCancellation()
             return actions
+        } catch let interruption as SimulatedFileOperationInterruption {
+            throw interruption
         } catch {
             // 失败的当前压缩也可能留下半成品，把尚未登记的目标补入回滚列表。
             for plan in plans where
@@ -200,7 +242,7 @@ actor FileOperationCoordinator {
                 ))
             }
             try? await eventHandler(.rollingBack(detail: "正在清理本批次未完成的压缩包"))
-            let rollback = rollback(actions: actions)
+            let rollback = rollback(actions: actions, authorization: authorization)
             throw CoordinatedFileOperationFailure(
                 message: error is CancellationError ? "压缩已取消。" : error.localizedDescription,
                 actions: rollback.actions,
@@ -214,10 +256,12 @@ actor FileOperationCoordinator {
     /// 批量移至废纸篓。每个项目的真实废纸篓路径会逐项返回并立即写入事务记录。
     func performTrash(
         _ urls: [URL],
+        authorization: FileOperationAuthorizationContext,
         eventHandler: EventHandler
     ) async throws -> [ReversibleFileAction] {
         var actions: [ReversibleFileAction] = []
         do {
+            try FileOperationPathValidator.validateSources(urls, authorization: authorization)
             for (index, url) in urls.enumerated() {
                 try Task.checkCancellation()
                 try await eventHandler(.willBegin(
@@ -225,12 +269,13 @@ actor FileOperationCoordinator {
                     total: urls.count,
                     detail: "正在将“\(url.lastPathComponent)”移至废纸篓"
                 ))
-                let trashURL = try fileOperationEngine.moveToTrash(url)
+                let trashURL = try fileOperationEngine.moveToTrash(url, authorization: authorization)
                 let action = ReversibleFileAction.discard(DiscardAction(
                     originalPath: url.path,
                     trashPath: trashURL.path
                 ))
                 actions.append(action)
+                try injectInterruptionAfterMutationIfNeeded()
                 try await eventHandler(.didApply(
                     action: action,
                     completed: index + 1,
@@ -239,12 +284,14 @@ actor FileOperationCoordinator {
             }
             try Task.checkCancellation()
             return actions
+        } catch let interruption as SimulatedFileOperationInterruption {
+            throw interruption
         } catch {
             let cancelled = error is CancellationError
             try? await eventHandler(.rollingBack(
                 detail: cancelled ? "正在取消并恢复废纸篓项目" : "删除未完成，正在恢复已移动项目"
             ))
-            let rollback = rollback(actions: actions)
+            let rollback = rollback(actions: actions, authorization: authorization)
             throw CoordinatedFileOperationFailure(
                 message: cancelled ? "移至废纸篓已取消。" : error.localizedDescription,
                 actions: rollback.actions,
@@ -258,15 +305,27 @@ actor FileOperationCoordinator {
     /// 创建单个真实目录也通过协调器执行，保证短 I/O 不会因为“通常很快”而回到主线程。
     func createDirectory(
         at destination: URL,
+        authorization: FileOperationAuthorizationContext,
         eventHandler: EventHandler
     ) async throws -> [ReversibleFileAction] {
-        try Task.checkCancellation()
-        try await eventHandler(.willBegin(step: 1, total: 1, detail: "正在新建“\(destination.lastPathComponent)”"))
         do {
+            try FileOperationPathValidator.validateDestinations(
+                [destination],
+                authorization: authorization
+            )
+            try Task.checkCancellation()
+            try await eventHandler(.willBegin(
+                step: 1,
+                total: 1,
+                detail: "正在新建“\(destination.lastPathComponent)”"
+            ))
             try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
             let action = ReversibleFileAction.materialize(MaterializeAction(destinationPath: destination.path))
+            try injectInterruptionAfterMutationIfNeeded()
             try await eventHandler(.didApply(action: action, completed: 1, total: 1))
             return [action]
+        } catch let interruption as SimulatedFileOperationInterruption {
+            throw interruption
         } catch {
             var actions: [ReversibleFileAction] = []
             if fileManager.fileExists(atPath: destination.path) {
@@ -274,7 +333,7 @@ actor FileOperationCoordinator {
                 actions.append(partial)
                 try? await eventHandler(.didApply(action: partial, completed: 1, total: 1))
             }
-            let rollback = rollback(actions: actions)
+            let rollback = rollback(actions: actions, authorization: authorization)
             throw CoordinatedFileOperationFailure(
                 message: error.localizedDescription,
                 actions: rollback.actions,
@@ -288,10 +347,15 @@ actor FileOperationCoordinator {
     /// Finder 标签逐项写入并逐项回报，日志失败会触发同批次回滚。
     func applyTags(
         _ actions: [TagAction],
+        authorization: FileOperationAuthorizationContext,
         eventHandler: EventHandler
     ) async throws -> [ReversibleFileAction] {
         var completedActions: [ReversibleFileAction] = []
         do {
+            try FileOperationPathValidator.validateSources(
+                actions.map { URL(fileURLWithPath: $0.path) },
+                authorization: authorization
+            )
             for (index, value) in actions.enumerated() {
                 try Task.checkCancellation()
                 try await eventHandler(.willBegin(
@@ -302,6 +366,7 @@ actor FileOperationCoordinator {
                 try writeFinderTags(value.after, to: URL(fileURLWithPath: value.path))
                 let action = ReversibleFileAction.tags(value)
                 completedActions.append(action)
+                try injectInterruptionAfterMutationIfNeeded()
                 try await eventHandler(.didApply(
                     action: action,
                     completed: index + 1,
@@ -309,9 +374,11 @@ actor FileOperationCoordinator {
                 ))
             }
             return completedActions
+        } catch let interruption as SimulatedFileOperationInterruption {
+            throw interruption
         } catch {
             try? await eventHandler(.rollingBack(detail: "正在恢复本批次原有标签"))
-            let rollback = rollback(actions: completedActions)
+            let rollback = rollback(actions: completedActions, authorization: authorization)
             throw CoordinatedFileOperationFailure(
                 message: error.localizedDescription,
                 actions: rollback.actions,
@@ -328,6 +395,7 @@ actor FileOperationCoordinator {
         record: OperationRecord,
         to targetState: OperationState,
         conflictChoice: ConflictChoice,
+        authorization: FileOperationAuthorizationContext,
         eventHandler: EventHandler
     ) async throws -> OperationRecord {
         let verb = targetState == .undone ? "撤销" : "重做"
@@ -339,13 +407,16 @@ actor FileOperationCoordinator {
         let updated = try fileOperationEngine.transition(
             record,
             to: targetState,
-            conflictChoice: conflictChoice
+            conflictChoice: conflictChoice,
+            authorization: authorization
         )
+        try injectInterruptionAfterMutationIfNeeded()
         return updated
     }
 
     private func rollback(
-        actions: [ReversibleFileAction]
+        actions: [ReversibleFileAction],
+        authorization: FileOperationAuthorizationContext
     ) -> (actions: [ReversibleFileAction], displacements: [ConflictDisplacement], succeeded: Bool) {
         guard !actions.isEmpty else { return ([], [], true) }
         let temporaryRecord = OperationRecord(
@@ -359,11 +430,20 @@ actor FileOperationCoordinator {
             let rolledBack = try fileOperationEngine.transition(
                 temporaryRecord,
                 to: .undone,
-                conflictChoice: .cancel
+                conflictChoice: .cancel,
+                authorization: authorization
             )
             return (rolledBack.actions, rolledBack.displacements, true)
         } catch {
             return (actions, [], false)
+        }
+    }
+
+    private func injectInterruptionAfterMutationIfNeeded() throws {
+        guard let faultInjection else { return }
+        mutationCount += 1
+        if mutationCount == faultInjection.interruptAfterMutation {
+            throw SimulatedFileOperationInterruption()
         }
     }
 }

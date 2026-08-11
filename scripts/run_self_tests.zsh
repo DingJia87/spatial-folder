@@ -21,6 +21,7 @@ SDKROOT="$SDK" CLANG_MODULE_CACHE_PATH="$CACHE" \
     "$ROOT/Sources/SpatialFolder/CanvasViewport.swift" \
     "$ROOT/Sources/SpatialFolder/CanvasLayoutEngine.swift" \
     "$ROOT/Sources/SpatialFolder/FileIconCache.swift" \
+    "$ROOT/Sources/SpatialFolder/FileOperationAuthorization.swift" \
     "$ROOT/Sources/SpatialFolder/FileOperationCoordinator.swift" \
     "$ROOT/Sources/SpatialFolder/FinderTagColor.swift" \
     "$ROOT/Sources/SpatialFolder/FolderChangeMonitor.swift" \
