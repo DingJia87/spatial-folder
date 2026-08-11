@@ -9,7 +9,7 @@
 
 ## 当前开发基线
 
-- [5.3 正式试用版计划与验收](plans/PLAN_5.3.md)
+- [5.3 正式发布计划与验收](plans/PLAN_5.3.md)
 - [5.3 发布说明](releases/RELEASE_NOTES_5.3.md)
 - [5.3 性能说明](performance/PERFORMANCE_5.3.md)
 - [5.2.2 写入安全闭环计划与验收](plans/PLAN_5.2.2.md)

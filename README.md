@@ -29,7 +29,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/DingJia87/spatial-folder/releases/latest) 下载页面标记为“指针空间.zip（正式安装包）”的 `Pointer-Space.zip`。
+从 [GitHub Releases](https://github.com/DingJia87/spatial-folder/releases/latest) 下载 v5.3.0 的正式安装包 `Pointer-Space-5.3.0.zip`。
 
 1. 解压 ZIP，把 `指针空间.app` 拖入“应用程序”。
 2. 首次启动时右键 App，选择“打开”。
@@ -91,7 +91,7 @@
 ./scripts/package_app.zsh
 ```
 
-5.3.0 正式试用版包含 22 项标准测试和 82 项完整自测。CI 会执行测试及严格 Release 构建。
+5.3.0 正式版包含 22 项标准测试和 82 项完整自测。CI 会执行测试及严格 Release 构建。
 
 ## 文档与支持
 

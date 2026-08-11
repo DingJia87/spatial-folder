@@ -14,11 +14,11 @@
 
 路径校验只在用户发起真实文件操作时短时执行。本版没有新增监听、定时器、索引、遥测或常驻缓存。
 
-## 本地正式试用产物
+## 正式发布产物
 
 - App：`Release/5.3.0/指针空间.app`
 - ZIP：`Release/5.3.0/指针空间.zip`
 - 内部版本：5.3.0（5300）
 - ZIP SHA-256：`506d600de07a636dbec2f1417273afab9b9ce0a34418070e8e41b05d13fc1124`
 
-该版本已完成本地真实使用验收并作为 `v5.3.0` 源码版本推送。GitHub Release 安装包页面可按需单独更新。
+该版本已完成真实使用验收并发布为 GitHub Latest Release。公开安装包为 [`Pointer-Space-5.3.0.zip`](https://github.com/DingJia87/spatial-folder/releases/download/v5.3.0/Pointer-Space-5.3.0.zip)；本地冻结产物保留在上述 `Release/5.3.0/` 路径中。
